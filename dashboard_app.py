@@ -218,15 +218,6 @@ def fetch_all_rows(
     return pd.DataFrame(all_rows)
 
 
-def ensure_sty_column(df: pd.DataFrame) -> pd.DataFrame:
-    """DB 컬럼이 style_code인 경우 앱 전역에서 쓰는 sty로 맞춘다."""
-    if df.empty or "sty" in df.columns:
-        return df
-    if "style_code" in df.columns:
-        return df.rename(columns={"style_code": "sty"})
-    return df
-
-
 def fetch_filtered_rows(
     client: Client,
     table_name: str,
@@ -274,21 +265,18 @@ def load_base_tables() -> Dict[str, pd.DataFrame]:
         ACTION_TABLE,
         "style_code,sku,plant,lead_time,current_qty_after_rotation,rotation_in_qty,rotation_out_qty,shortage_start_year_week,shortage_qty_after_rotation,center_alloc_qty,reorder_qty,reorder_action_year_week,final_action,priority_rank,reason"
     )
-    action_df = ensure_sty_column(action_df)
 
     rotation_df = fetch_all_rows(
         client,
         ROTATION_TABLE,
         "*"
     )
-    rotation_df = ensure_sty_column(rotation_df)
 
     status_df = fetch_all_rows(
         client,
         STATUS_TABLE,
         "style_code,sku,plant,store_classification,lead_time,current_qty,stock_weeks,shortage_qty,surplus_qty"
     )
-    status_df = ensure_sty_column(status_df)
 
     return {
         "action": action_df,
@@ -307,12 +295,11 @@ def load_weekly_by_sty(sty: str) -> pd.DataFrame:
         "style_code,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock",
         filters=[("style_code", "eq", sty)]
     )
-    df = ensure_sty_column(df)
 
     if df.empty:
         return df
 
-    for col in ["sty", "sku", "plant", "store_name", "year_week"]:
+    for col in ["style_code", "sku", "plant", "store_name", "year_week"]:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(str).str.strip()
@@ -334,12 +321,19 @@ def load_weekly_by_sty(sty: str) -> pd.DataFrame:
 # =========================
 def prepare_action_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return df.copy()
+        return pd.DataFrame(columns=[
+            "style_code", "sku", "plant", "shortage_start_year_week",
+            "reorder_action_year_week", "final_action", "reason",
+            "lead_time", "current_qty_after_rotation",
+            "rotation_in_qty", "rotation_out_qty",
+            "shortage_qty_after_rotation", "center_alloc_qty",
+            "reorder_qty", "priority_rank",
+        ])
 
     out = df.copy()
 
     for col in [
-        "sty", "sku", "plant", "shortage_start_year_week",
+        "style_code", "sku", "plant", "shortage_start_year_week",
         "reorder_action_year_week", "final_action", "reason"
     ]:
         if col not in out.columns:
@@ -361,11 +355,14 @@ def prepare_action_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_status_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return df.copy()
+        return pd.DataFrame(columns=[
+            "style_code", "sku", "plant", "store_classification",
+            "lead_time", "current_qty", "stock_weeks", "shortage_qty", "surplus_qty",
+        ])
 
     out = df.copy()
 
-    for col in ["sty", "sku", "plant", "store_classification"]:
+    for col in ["style_code", "sku", "plant", "store_classification"]:
         if col not in out.columns:
             out[col] = ""
         out[col] = out[col].astype(str).str.strip()
@@ -380,11 +377,14 @@ def prepare_status_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_rotation_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return df.copy()
+        return pd.DataFrame(columns=[
+            "style_code", "sku", "from_plant", "to_plant", "reason",
+            "transfer_qty", "priority_rank",
+        ])
 
     out = df.copy()
 
-    for col in ["sty", "sku", "from_plant", "to_plant", "reason"]:
+    for col in ["style_code", "sku", "from_plant", "to_plant", "reason"]:
         if col not in out.columns:
             out[col] = ""
         out[col] = out[col].astype(str).str.strip()
@@ -441,22 +441,27 @@ def build_style_board(
     rotation_df: pd.DataFrame,
     status_df: pd.DataFrame
 ) -> pd.DataFrame:
-    styles = sorted(set(action_df["sty"].dropna().astype(str).str.strip()) | set(status_df["sty"].dropna().astype(str).str.strip()))
+    def _style_set(d: pd.DataFrame) -> set:
+        if d.empty or "style_code" not in d.columns:
+            return set()
+        return set(d["style_code"].dropna().astype(str).str.strip())
+
+    styles = sorted(_style_set(action_df) | _style_set(status_df) | _style_set(rotation_df))
     rows = []
 
     for sty in styles:
         if not sty:
             continue
 
-        a = action_df[action_df["sty"] == sty].copy()
-        r = rotation_df[rotation_df["sty"] == sty].copy()
-        s = status_df[status_df["sty"] == sty].copy()
+        a = action_df[action_df["style_code"] == sty].copy()
+        r = rotation_df[rotation_df["style_code"] == sty].copy() if "style_code" in rotation_df.columns else pd.DataFrame()
+        s = status_df[status_df["style_code"] == sty].copy()
 
         action_type = classify_style_action(a, r)
         urgency = style_urgency(a)
 
         rows.append({
-            "sty": sty,
+            "style_code": sty,
             "action_type": action_type,
             "urgency": urgency,
             "sku_cnt": a["sku"].nunique() if not a.empty else s["sku"].nunique(),
@@ -474,7 +479,7 @@ def build_style_board(
 
     out["urgency_rank"] = out["urgency"].apply(urgency_rank)
     out = out.sort_values(
-        ["urgency_rank", "total_reorder_qty", "total_rotation_qty", "sty"],
+        ["urgency_rank", "total_reorder_qty", "total_rotation_qty", "style_code"],
         ascending=[True, False, False, True]
     ).reset_index(drop=True)
     return out
@@ -486,15 +491,19 @@ def build_sku_summary_for_style(
     rotation_df: pd.DataFrame,
     status_df: pd.DataFrame
 ) -> pd.DataFrame:
-    a = action_df[action_df["sty"] == sty].copy()
-    r = rotation_df[rotation_df["sty"] == sty].copy()
-    s = status_df[status_df["sty"] == sty].copy()
+    a = action_df[action_df["style_code"] == sty].copy()
+    r = (
+        rotation_df[rotation_df["style_code"] == sty].copy()
+        if "style_code" in rotation_df.columns
+        else pd.DataFrame()
+    )
+    s = status_df[status_df["style_code"] == sty].copy()
 
     if a.empty and s.empty:
         return pd.DataFrame()
 
     a_sum = (
-        a.groupby(["sty", "sku"], as_index=False)
+        a.groupby(["style_code", "sku"], as_index=False)
         .agg(
             plant_cnt=("plant", "nunique"),
             total_reorder_qty=("reorder_qty", "sum"),
@@ -504,25 +513,25 @@ def build_sku_summary_for_style(
             final_action=("final_action", "first"),
             reorder_action_year_week=("reorder_action_year_week", "first"),
         )
-    ) if not a.empty else pd.DataFrame(columns=["sty", "sku"])
+    ) if not a.empty else pd.DataFrame(columns=["style_code", "sku"])
 
     s_sum = (
-        s.groupby(["sty", "sku"], as_index=False)
+        s.groupby(["style_code", "sku"], as_index=False)
         .agg(
             shortage_store_cnt=("store_classification", lambda x: (x == "부족매장").sum()),
             surplus_store_cnt=("store_classification", lambda x: (x == "여유매장").sum()),
             keep_store_cnt=("store_classification", lambda x: (x == "유지매장").sum()),
             avg_stock_weeks=("stock_weeks", "mean"),
         )
-    ) if not s.empty else pd.DataFrame(columns=["sty", "sku"])
+    ) if not s.empty else pd.DataFrame(columns=["style_code", "sku"])
 
     r_sum = (
-        r.groupby(["sty", "sku"], as_index=False)
+        r.groupby(["style_code", "sku"], as_index=False)
         .agg(rotation_qty=("transfer_qty", "sum"))
-    ) if not r.empty else pd.DataFrame(columns=["sty", "sku"])
+    ) if not r.empty else pd.DataFrame(columns=["style_code", "sku"])
 
-    out = a_sum.merge(s_sum, on=["sty", "sku"], how="outer")
-    out = out.merge(r_sum, on=["sty", "sku"], how="left")
+    out = a_sum.merge(s_sum, on=["style_code", "sku"], how="outer")
+    out = out.merge(r_sum, on=["style_code", "sku"], how="left")
     out["rotation_qty"] = pd.to_numeric(out.get("rotation_qty", 0), errors="coerce").fillna(0)
     out["urgency"] = out.get("reorder_action_year_week", "").apply(urgency_label_from_week)
     out["urgency_rank"] = out["urgency"].apply(urgency_rank)
@@ -559,15 +568,15 @@ def build_store_analysis(
     action_df: pd.DataFrame,
     status_df: pd.DataFrame
 ) -> pd.DataFrame:
-    a = action_df[(action_df["sty"] == sty) & (action_df["sku"] == sku)].copy()
-    s = status_df[(status_df["sty"] == sty) & (status_df["sku"] == sku)].copy()
+    a = action_df[(action_df["style_code"] == sty) & (action_df["sku"] == sku)].copy()
+    s = status_df[(status_df["style_code"] == sty) & (status_df["sku"] == sku)].copy()
 
     if a.empty and s.empty:
         return pd.DataFrame()
 
     out = s.merge(
         a[[
-            "sty", "sku", "plant",
+            "style_code", "sku", "plant",
             "current_qty_after_rotation",
             "rotation_in_qty", "rotation_out_qty",
             "shortage_start_year_week",
@@ -578,7 +587,7 @@ def build_store_analysis(
             "final_action",
             "reason"
         ]],
-        on=["sty", "sku", "plant"],
+        on=["style_code", "sku", "plant"],
         how="outer"
     )
 
@@ -685,14 +694,14 @@ def main():
             board_view = board_view[board_view["urgency"].isin(urgency_filter)]
         if keyword.strip():
             board_view = board_view[
-                board_view["sty"].astype(str).str.contains(keyword.strip(), case=False, na=False)
+                board_view["style_code"].astype(str).str.contains(keyword.strip(), case=False, na=False)
             ]
 
         if not board_view.empty:
             board_show = board_view.copy()
             board_show["긴급도"] = board_show["urgency"].apply(lambda x: x)
             board_show = board_show.rename(columns={
-                "sty": "스타일",
+                "style_code": "스타일",
                 "action_type": "액션",
                 "sku_cnt": "SKU수",
                 "plant_cnt": "매장수",
@@ -715,16 +724,20 @@ def main():
     with tab2:
         st.markdown('<div class="section-title">스타일 상세</div>', unsafe_allow_html=True)
 
-        style_options = style_board_df["sty"].dropna().astype(str).tolist()
+        style_options = style_board_df["style_code"].dropna().astype(str).tolist()
         if not style_options:
             st.info("선택 가능한 스타일이 없습니다.")
             return
 
         selected_sty = st.selectbox("스타일 선택", style_options)
 
-        sty_action_df = action_df[action_df["sty"] == selected_sty].copy()
-        sty_rotation_df = rotation_df[rotation_df["sty"] == selected_sty].copy()
-        sty_status_df = status_df[status_df["sty"] == selected_sty].copy()
+        sty_action_df = action_df[action_df["style_code"] == selected_sty].copy()
+        sty_rotation_df = (
+            rotation_df[rotation_df["style_code"] == selected_sty].copy()
+            if "style_code" in rotation_df.columns
+            else pd.DataFrame()
+        )
+        sty_status_df = status_df[status_df["style_code"] == selected_sty].copy()
 
         action_type = classify_style_action(sty_action_df, sty_rotation_df)
         urgency = style_urgency(sty_action_df)
