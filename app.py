@@ -416,6 +416,30 @@ def insert_store_inventory_status_step1(
 
 
 # =========================
+# step1 계산 + 저장
+# =========================
+def rebuild_store_inventory_status_step1(
+    client: Client,
+    weekly_df: pd.DataFrame,
+    reorder_df: pd.DataFrame,
+    forecast_run_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    step1 계산 -> 기존 데이터 삭제 -> 새 데이터 저장
+    """
+    result_df = build_store_inventory_status_step1(
+        weekly_df=weekly_df,
+        reorder_df=reorder_df,
+        forecast_run_df=forecast_run_df,
+    )
+
+    clear_store_inventory_status_step1(client)
+    insert_store_inventory_status_step1(client, result_df)
+
+    return result_df
+
+
+# =========================
 # 화면
 # =========================
 def main():
@@ -452,14 +476,31 @@ def main():
         with st.expander("sku_weekly_forecast 미리보기"):
             st.dataframe(tables["sku_weekly_forecast"].head(30), use_container_width=True)
 
-        if st.button("step1 계산하기", type="primary"):
-            result_df = build_store_inventory_status_step1(
-                weekly_df=tables["sku_weekly_forecast"],
-                reorder_df=tables["reorder"],
-                forecast_run_df=tables["sku_forecast_run"],
-            )
-            st.session_state["step1_df"] = result_df
-            st.success(f"계산 완료: {len(result_df):,}건")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("step1 계산 미리보기", type="primary"):
+                result_df = build_store_inventory_status_step1(
+                    weekly_df=tables["sku_weekly_forecast"],
+                    reorder_df=tables["reorder"],
+                    forecast_run_df=tables["sku_forecast_run"],
+                )
+                st.session_state["step1_df"] = result_df
+                st.success(f"계산 완료: {len(result_df):,}건")
+
+        with col2:
+            if st.button("step1 계산 후 Supabase 저장"):
+                client = get_supabase_client()
+
+                result_df = rebuild_store_inventory_status_step1(
+                    client=client,
+                    weekly_df=tables["sku_weekly_forecast"],
+                    reorder_df=tables["reorder"],
+                    forecast_run_df=tables["sku_forecast_run"],
+                )
+
+                st.session_state["step1_df"] = result_df
+                st.success(f"store_inventory_status_step1 저장 완료: {len(result_df):,}건")
 
     step1_df = st.session_state.get("step1_df")
 
@@ -467,23 +508,13 @@ def main():
         st.subheader("계산 결과 미리보기")
         st.dataframe(step1_df, use_container_width=True)
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("store_inventory_status_step1 전체 삭제 후 다시 저장"):
-                client = get_supabase_client()
-                clear_store_inventory_status_step1(client)
-                inserted = insert_store_inventory_status_step1(client, step1_df)
-                st.success(f"{inserted:,}건 저장 완료")
-
-        with col2:
-            csv = step1_df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                label="CSV 다운로드",
-                data=csv,
-                file_name="store_inventory_status_step1.csv",
-                mime="text/csv"
-            )
+        csv = step1_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label="CSV 다운로드",
+            data=csv,
+            file_name="store_inventory_status_step1.csv",
+            mime="text/csv"
+        )
 
 
 if __name__ == "__main__":
