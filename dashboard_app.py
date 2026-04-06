@@ -118,6 +118,13 @@ def to_int(v: Any, default: int = 0) -> int:
     return int(round(float(x)))
 
 
+def numeric_series(df: pd.DataFrame, col: str, fill: float = 0.0) -> pd.Series:
+    """컬럼이 없거나 비어 있으면 fill로 채운 Series. DataFrame.get 기본값 스칼라로 인한 .fillna 오류 방지."""
+    if df.empty or col not in df.columns:
+        return pd.Series(fill, index=df.index, dtype=float)
+    return pd.to_numeric(df[col], errors="coerce").fillna(fill)
+
+
 def parse_year_week_sort_key(year_week: str) -> Tuple[int, int]:
     try:
         s = str(year_week).strip()
@@ -398,7 +405,7 @@ def prepare_rotation_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def classify_style_action(style_action_df: pd.DataFrame, style_rotation_df: pd.DataFrame) -> str:
-    reorder_needed = pd.to_numeric(style_action_df.get("reorder_qty", 0), errors="coerce").fillna(0).sum() > 0
+    reorder_needed = numeric_series(style_action_df, "reorder_qty").sum() > 0
     rotation_needed = False
 
     if not style_rotation_df.empty and "transfer_qty" in style_rotation_df.columns:
@@ -466,9 +473,9 @@ def build_style_board(
             "urgency": urgency,
             "sku_cnt": a["sku"].nunique() if not a.empty else s["sku"].nunique(),
             "plant_cnt": a["plant"].nunique() if not a.empty else s["plant"].nunique(),
-            "total_reorder_qty": int(pd.to_numeric(a.get("reorder_qty", 0), errors="coerce").fillna(0).sum()),
-            "total_center_alloc_qty": int(pd.to_numeric(a.get("center_alloc_qty", 0), errors="coerce").fillna(0).sum()),
-            "total_rotation_qty": int(pd.to_numeric(r.get("transfer_qty", 0), errors="coerce").fillna(0).sum()) if not r.empty else 0,
+            "total_reorder_qty": int(numeric_series(a, "reorder_qty").sum()),
+            "total_center_alloc_qty": int(numeric_series(a, "center_alloc_qty").sum()),
+            "total_rotation_qty": int(numeric_series(r, "transfer_qty").sum()) if not r.empty else 0,
             "shortage_store_cnt": int((s.get("store_classification", "") == "부족매장").sum()) if not s.empty else 0,
             "surplus_store_cnt": int((s.get("store_classification", "") == "여유매장").sum()) if not s.empty else 0,
         })
@@ -532,8 +539,13 @@ def build_sku_summary_for_style(
 
     out = a_sum.merge(s_sum, on=["style_code", "sku"], how="outer")
     out = out.merge(r_sum, on=["style_code", "sku"], how="left")
-    out["rotation_qty"] = pd.to_numeric(out.get("rotation_qty", 0), errors="coerce").fillna(0)
-    out["urgency"] = out.get("reorder_action_year_week", "").apply(urgency_label_from_week)
+    out["rotation_qty"] = numeric_series(out, "rotation_qty")
+    yw = (
+        out["reorder_action_year_week"]
+        if "reorder_action_year_week" in out.columns
+        else pd.Series("", index=out.index, dtype=object)
+    )
+    out["urgency"] = yw.apply(urgency_label_from_week)
     out["urgency_rank"] = out["urgency"].apply(urgency_rank)
 
     return out.sort_values(
@@ -750,9 +762,12 @@ def main():
         with k3:
             render_metric_card("긴급도", urgency)
         with k4:
-            render_metric_card("총 리오더", f"{int(pd.to_numeric(sty_action_df.get('reorder_qty', 0), errors='coerce').fillna(0).sum()):,}")
+            render_metric_card("총 리오더", f"{int(numeric_series(sty_action_df, 'reorder_qty').sum()):,}")
         with k5:
-            render_metric_card("총 회전", f"{int(pd.to_numeric(sty_rotation_df.get('transfer_qty', 0), errors='coerce').fillna(0).sum()) if not sty_rotation_df.empty else 0:,}")
+            render_metric_card(
+                "총 회전",
+                f"{int(numeric_series(sty_rotation_df, 'transfer_qty').sum()) if not sty_rotation_df.empty else 0:,}",
+            )
 
         sku_summary_df = build_sku_summary_for_style(
             selected_sty,
