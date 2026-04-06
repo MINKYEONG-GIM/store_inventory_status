@@ -460,61 +460,33 @@ def main():
             """
         )
 
-    if st.button("원천 테이블 불러오기"):
+    if st.button("step1 계산 후 Supabase 저장", type="primary"):
         tables = load_source_tables()
         st.session_state["tables"] = tables
-        st.success("원천 테이블을 불러왔습니다.")
+
+        client = get_supabase_client()
+        result_df = rebuild_store_inventory_status_step1(
+            client=client,
+            weekly_df=tables["sku_weekly_forecast"],
+            reorder_df=tables["reorder"],
+            forecast_run_df=tables["sku_forecast_run"],
+        )
+
+        st.session_state["step1_df"] = result_df
+        st.success(f"store_inventory_status_step1 저장 완료: {len(result_df):,}건")
 
     tables = st.session_state.get("tables")
-
     if tables:
         c1, c2, c3 = st.columns(3)
         c1.metric("sku_weekly_forecast 행수", len(tables["sku_weekly_forecast"]))
         c2.metric("reorder 행수", len(tables["reorder"]))
         c3.metric("sku_forecast_run 행수", len(tables["sku_forecast_run"]))
 
-        with st.expander("sku_weekly_forecast 미리보기"):
-            st.dataframe(tables["sku_weekly_forecast"].head(30), use_container_width=True)
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("step1 계산 미리보기", type="primary"):
-                result_df = build_store_inventory_status_step1(
-                    weekly_df=tables["sku_weekly_forecast"],
-                    reorder_df=tables["reorder"],
-                    forecast_run_df=tables["sku_forecast_run"],
-                )
-                st.session_state["step1_df"] = result_df
-                st.success(f"계산 완료: {len(result_df):,}건")
-
-        with col2:
-            if st.button("step1 계산 후 Supabase 저장"):
-                client = get_supabase_client()
-
-                result_df = rebuild_store_inventory_status_step1(
-                    client=client,
-                    weekly_df=tables["sku_weekly_forecast"],
-                    reorder_df=tables["reorder"],
-                    forecast_run_df=tables["sku_forecast_run"],
-                )
-
-                st.session_state["step1_df"] = result_df
-                st.success(f"store_inventory_status_step1 저장 완료: {len(result_df):,}건")
-
     step1_df = st.session_state.get("step1_df")
 
     if step1_df is not None:
         st.subheader("계산 결과 미리보기")
         st.dataframe(step1_df, use_container_width=True)
-
-        csv = step1_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="CSV 다운로드",
-            data=csv,
-            file_name="store_inventory_status_step1.csv",
-            mime="text/csv"
-        )
 
 
 if __name__ == "__main__":
