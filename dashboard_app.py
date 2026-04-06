@@ -218,6 +218,15 @@ def fetch_all_rows(
     return pd.DataFrame(all_rows)
 
 
+def ensure_sty_column(df: pd.DataFrame) -> pd.DataFrame:
+    """DB 컬럼이 style_code인 경우 앱 전역에서 쓰는 sty로 맞춘다."""
+    if df.empty or "sty" in df.columns:
+        return df
+    if "style_code" in df.columns:
+        return df.rename(columns={"style_code": "sty"})
+    return df
+
+
 def fetch_filtered_rows(
     client: Client,
     table_name: str,
@@ -265,18 +274,21 @@ def load_base_tables() -> Dict[str, pd.DataFrame]:
         ACTION_TABLE,
         "sty,sku,plant,lead_time,current_qty_after_rotation,rotation_in_qty,rotation_out_qty,shortage_start_year_week,shortage_qty_after_rotation,center_alloc_qty,reorder_qty,reorder_action_year_week,final_action,priority_rank,reason"
     )
+    action_df = ensure_sty_column(action_df)
 
     rotation_df = fetch_all_rows(
         client,
         ROTATION_TABLE,
         "*"
     )
+    rotation_df = ensure_sty_column(rotation_df)
 
     status_df = fetch_all_rows(
         client,
         STATUS_TABLE,
-        "sty,sku,plant,store_classification,lead_time,current_qty,stock_weeks,shortage_qty,surplus_qty"
+        "style_code,sku,plant,store_classification,lead_time,current_qty,stock_weeks,shortage_qty,surplus_qty"
     )
+    status_df = ensure_sty_column(status_df)
 
     return {
         "action": action_df,
@@ -295,6 +307,7 @@ def load_weekly_by_sty(sty: str) -> pd.DataFrame:
         "sty,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock",
         filters=[("sty", "eq", sty)]
     )
+    df = ensure_sty_column(df)
 
     if df.empty:
         return df
