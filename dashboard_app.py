@@ -272,7 +272,7 @@ def load_base_tables() -> Dict[str, pd.DataFrame]:
     action_df = fetch_all_rows(
         client,
         ACTION_TABLE,
-        "sty,sku,plant,lead_time,current_qty_after_rotation,rotation_in_qty,rotation_out_qty,shortage_start_year_week,shortage_qty_after_rotation,center_alloc_qty,reorder_qty,reorder_action_year_week,final_action,priority_rank,reason"
+        "style_code,sku,plant,lead_time,current_qty_after_rotation,rotation_in_qty,rotation_out_qty,shortage_start_year_week,shortage_qty_after_rotation,center_alloc_qty,reorder_qty,reorder_action_year_week,final_action,priority_rank,reason"
     )
     action_df = ensure_sty_column(action_df)
 
@@ -304,8 +304,8 @@ def load_weekly_by_sty(sty: str) -> pd.DataFrame:
     df = fetch_filtered_rows(
         client,
         WEEKLY_TABLE,
-        "sty,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock",
-        filters=[("sty", "eq", sty)]
+        "style_code,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock",
+        filters=[("style_code", "eq", sty)]
     )
     df = ensure_sty_column(df)
 
