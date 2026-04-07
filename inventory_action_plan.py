@@ -1,11 +1,19 @@
 import math
+import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, TypeVar
 
+import httpx
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
+from supabase.client import ClientOptions
+
+T = TypeVar("T")
+
+# 전체 테이블 단일 delete 시 연결 끊김(ReadError) 방지용 배치 크기
+_ACTION_CLEAR_BATCH_SIZE: int = 1000
 
 
 # =========================
@@ -32,7 +40,34 @@ st.set_page_config(
 def get_supabase_client() -> Client:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    return create_client(
+        url,
+        key,
+        options=ClientOptions(
+            postgrest_client_timeout=httpx.Timeout(30.0, read=300.0, write=300.0, pool=30.0),
+        ),
+    )
+
+
+def _postgrest_execute_with_retry(fn: Callable[[], T], attempts: int = 5, base_delay: float = 1.0) -> T:
+    """일시적 네트워크 오류(ReadError 등) 시 재시도."""
+    transient = (
+        httpx.ReadError,
+        httpx.ConnectError,
+        httpx.RemoteProtocolError,
+        httpx.WriteError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+    )
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except transient:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(base_delay * (2**attempt))
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 # =========================
@@ -627,13 +662,44 @@ def build_inventory_action_plan_step2(
 # 저장
 # =========================
 def clear_inventory_action_plan_step2(client: Client) -> None:
-    sentinel = "__never_match_sku__"
-    (
-        client.table(ACTION_TABLE_NAME)
-        .delete()
-        .neq("sku", sentinel)
-        .execute()
-    )
+    """행이 많을 때 단일 delete는 ReadError가 나기 쉬워 id 기준 배치 삭제를 우선 사용."""
+
+    def _bulk_delete_all() -> None:
+        sentinel = "__never_match_sku__"
+        _postgrest_execute_with_retry(
+            lambda: client.table(ACTION_TABLE_NAME).delete().neq("sku", sentinel).execute()
+        )
+
+    try:
+        probe = _postgrest_execute_with_retry(
+            lambda: client.table(ACTION_TABLE_NAME).select("id").limit(1).execute()
+        )
+    except Exception:
+        _bulk_delete_all()
+        return
+
+    rows_probe = probe.data or []
+    if not rows_probe or rows_probe[0].get("id") is None:
+        _bulk_delete_all()
+        return
+
+    while True:
+        resp = _postgrest_execute_with_retry(
+            lambda: client.table(ACTION_TABLE_NAME)
+            .select("id")
+            .limit(_ACTION_CLEAR_BATCH_SIZE)
+            .execute()
+        )
+        batch = resp.data or []
+        if not batch:
+            return
+        ids = [r["id"] for r in batch if r.get("id") is not None]
+        if not ids:
+            _bulk_delete_all()
+            return
+        _postgrest_execute_with_retry(
+            lambda ids_=ids: client.table(ACTION_TABLE_NAME).delete().in_("id", ids_).execute()
+        )
 
 
 def insert_inventory_action_plan_step2(
