@@ -135,7 +135,7 @@ def load_source_tables() -> Dict[str, pd.DataFrame]:
         "sku_weekly_forecast": fetch_all_rows(
             client,
             "sku_weekly_forecast",
-            "sty,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock"
+            "style_code,sku,plant,store_name,year_week,sale_qty,is_forecast,begin_stock"
         ),
     }
 
@@ -146,14 +146,16 @@ def load_source_tables() -> Dict[str, pd.DataFrame]:
 def prepare_step1_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=[
-            "sty", "sku", "plant",
+            "style_code", "sku", "plant",
             "store_classification", "lead_time", "current_qty",
             "stock_weeks", "shortage_qty", "surplus_qty"
         ])
 
     out = df.copy()
+    if "style_code" not in out.columns and "sty" in out.columns:
+        out = out.rename(columns={"sty": "style_code"})
 
-    for col in ["sty", "sku", "plant", "store_classification"]:
+    for col in ["style_code", "sku", "plant", "store_classification"]:
         if col not in out.columns:
             out[col] = ""
         out[col] = out[col].astype(str).str.strip()
@@ -246,11 +248,13 @@ def prepare_inbound_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_weekly_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["sty", "sku", "plant", "year_week", "sale_qty", "is_forecast"])
+        return pd.DataFrame(columns=["style_code", "sku", "plant", "year_week", "sale_qty", "is_forecast"])
 
     out = df.copy()
+    if "style_code" not in out.columns and "sty" in out.columns:
+        out = out.rename(columns={"sty": "style_code"})
 
-    for col in ["sty", "sku", "plant", "year_week"]:
+    for col in ["style_code", "sku", "plant", "year_week"]:
         if col not in out.columns:
             out[col] = ""
         out[col] = out[col].astype(str).str.strip()
@@ -529,7 +533,7 @@ def build_inventory_action_plan_step2(
 
     # 회전 반영 후 매장별 부족 계산
     for _, row in step1_df.iterrows():
-        sty = str(row.get("sty", "")).strip()
+        style_code = str(row.get("style_code", "")).strip()
         sku = str(row.get("sku", "")).strip()
         plant = str(row.get("plant", "")).strip()
         lead_time = to_float(row.get("lead_time", 0), 0.0)
@@ -560,7 +564,7 @@ def build_inventory_action_plan_step2(
         )
 
         result_rows.append({
-            "sty": sty,
+            "style_code": style_code,
             "sku": sku,
             "plant": plant,
             "lead_time": round(lead_time, 2),
