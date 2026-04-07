@@ -357,7 +357,11 @@ def build_stage_colored_sales_chart(df_weekly: pd.DataFrame) -> alt.Chart:
         ],
     )
 
-    line = base.mark_line(point=False, strokeWidth=3).encode(
+    # 1) 끊김 없이 전체 모양을 보여주는 기준 라인(단색)
+    backbone = base.mark_line(point=False, strokeWidth=3, color="#111827", opacity=0.35)
+
+    # 2) stage별 색을 덧씌우는 라인(구간 분절 때문에 내부적으로는 끊기지만, backbone으로 연속성 유지)
+    colored = base.mark_line(point=False, strokeWidth=3).encode(
         color=alt.Color("stage:N", scale=stage_color_scale(), legend=alt.Legend(title="stage")),
         detail="segment_id:N",
     )
@@ -366,7 +370,7 @@ def build_stage_colored_sales_chart(df_weekly: pd.DataFrame) -> alt.Chart:
         color=alt.Color("stage:N", scale=stage_color_scale(), legend=None),
     )
 
-    return (line + points).properties(height=260)
+    return (backbone + colored + points).properties(height=260)
 
 
 def get_gspread_client():
