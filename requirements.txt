@@ -16,3 +16,9 @@ psycopg2-binary
 pyodbc
 st-gsheets-connection
 supabase
+streamlit
+pandas
+numpy
+gspread
+google-auth
+supabase
