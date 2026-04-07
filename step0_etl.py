@@ -545,9 +545,10 @@ def get_supabase_client():
 
 def get_raw_file_table_name() -> str:
     """
-    final 데이터 원천 Supabase 테이블명.
-    secrets.toml [supabase] raw_file_table (기본: raw_file)
+    final 데이터 원천 Supabase 테이블명(PostgREST에 노출된 이름과 동일해야 함).
+    secrets.toml [supabase] raw_file_table (기본: RAW FILE — 공백 포함 테이블명)
     환경변수 SUPABASE_RAW_FILE_TABLE
+    snake_case 테이블이면 secrets에 raw_file_table = "raw_file" 처럼 지정.
     """
     try:
         if hasattr(st, "secrets") and "supabase" in st.secrets:
@@ -556,7 +557,7 @@ def get_raw_file_table_name() -> str:
                 return str(v).strip()
     except Exception:
         pass
-    return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "raw_file").strip()
+    return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "RAW FILE").strip()
 
 
 def fetch_supabase_table_all_rows(
@@ -1190,14 +1191,14 @@ def load_plc_df() -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def load_final_df() -> pd.DataFrame:
     """
-    올해 실적 등 final 계열 데이터는 Supabase `raw_file` 테이블(이름은 [supabase].raw_file_table)에서 읽습니다.
+    올해 실적 등 final 계열 데이터는 Supabase 테이블(기본 이름 `RAW FILE`, [supabase].raw_file_table로 변경 가능)에서 읽습니다.
     """
     client = get_supabase_client()
     if client is None:
         raise RuntimeError(
             "final 데이터는 Supabase 테이블에서 읽습니다. "
             "secrets에 [supabase] url·service_role_key(또는 anon_key)를 설정하고, "
-            "필요 시 raw_file_table 로 테이블명을 지정하세요(기본: raw_file)."
+            "필요 시 raw_file_table 로 테이블명을 지정하세요(기본: RAW FILE)."
         )
     return load_raw_file_df_from_supabase(client)
 
@@ -2204,7 +2205,8 @@ def main():
             f"**오류 유형:** `{type(e).__name__}`  \n"
             f"**메시지:** {e}\n\n"
             "점검: Streamlit Secrets의 `[supabase] url`·`service_role_key`(또는 anon), "
-            f"선택 `raw_file_table`(기본 `raw_file`), 테이블 RLS의 **SELECT** 허용, 실제 테이블명(대소문자)."
+            f"선택 `raw_file_table`(기본 `RAW FILE`, 공백·대소문자는 Supabase와 동일하게), "
+            "테이블 RLS의 **SELECT** 허용."
         )
         st.stop()
 
@@ -2744,7 +2746,7 @@ def main():
     
         if real_week.empty:
             st.warning(
-                "올해 매출 데이터가 없습니다. Supabase raw_file 테이블의 날짜·판매량 컬럼(또는 CALDAY/SALE 스키마)과 "
+                "올해 매출 데이터가 없습니다. Supabase final 원천 테이블의 날짜·판매량 컬럼(또는 CALDAY/SALE 스키마)과 "
                 "sku 매칭을 확인하세요."
             )
         else:
