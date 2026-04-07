@@ -415,6 +415,97 @@ def load_plc_db_df() -> pd.DataFrame:
     return load_sheet_as_df(ws_name)
 
 
+def build_item_weekly_df_from_plc_row(row: pd.Series, week_cols_sorted: List[str]) -> pd.DataFrame:
+    series_records: List[Dict[str, Any]] = []
+    for yw in week_cols_sorted:
+        monday = parse_yearweek_to_monday(yw)
+        if pd.isna(monday):
+            continue
+        sales = clean_number(row.get(yw))
+        sales_v = 0.0 if pd.isna(sales) else float(sales)
+        series_records.append(
+            {
+                "year_week": yw,
+                "week_start": pd.Timestamp(monday),
+                "month_ts": pd.Timestamp(monday).to_period("M").to_timestamp(),
+                "sales": sales_v,
+            }
+        )
+
+    if not series_records:
+        return pd.DataFrame(columns=["year_week", "week_start", "month_ts", "sales"])
+
+    dfw = pd.DataFrame(series_records).dropna(subset=["week_start"]).copy()
+    if dfw.empty:
+        return pd.DataFrame(columns=["year_week", "week_start", "month_ts", "sales"])
+
+    return dfw.sort_values("week_start").reset_index(drop=True)
+
+
+def compute_item_metrics_from_weekly_df(dfw: pd.DataFrame) -> Dict[str, Any]:
+    if dfw is None or dfw.empty:
+        return {
+            "shape_type": None,
+            "peak_week": None,
+            "peak_month": None,
+            "weekly_with_stage": dfw,
+            "monthly": pd.DataFrame(columns=["month_ts", "sales"]),
+        }
+
+    dfw = dfw.copy()
+    total_sales = float(pd.to_numeric(dfw["sales"], errors="coerce").fillna(0.0).sum())
+    if total_sales > 0:
+        dfw["last_year_ratio_pct"] = (dfw["sales"] / total_sales) * 100.0
+    else:
+        dfw["last_year_ratio_pct"] = 0.0
+
+    monthly = (
+        dfw.groupby("month_ts", as_index=False)["sales"]
+        .sum()
+        .sort_values("month_ts")
+        .reset_index(drop=True)
+    )
+    shape_type = classify_shape_type_from_monthly(monthly["sales"].values.astype(float) if not monthly.empty else np.array([]))
+
+    stages_raw = classify_weekly_stage_by_shape(dfw["sales"].values.astype(float), shape_type)
+    if len(stages_raw) != len(dfw):
+        stages_raw = ["성숙"] * len(dfw)
+    dfw["stage_raw"] = stages_raw
+    dfw["stage"] = [normalize_stage_for_db(s) for s in stages_raw]
+
+    growth_maturity = dfw[dfw["stage"].isin(["성장", "성숙"])].copy()
+    if growth_maturity.empty:
+        peak_week: Optional[int] = None
+        peak_month: Optional[int] = None
+    else:
+        idx = int(pd.to_numeric(growth_maturity["sales"], errors="coerce").fillna(0.0).values.argmax())
+        peak_row = growth_maturity.iloc[idx]
+        try:
+            peak_week = int(pd.Timestamp(peak_row["week_start"]).isocalendar().week)
+        except Exception:
+            peak_week = None
+
+        gm_monthly = (
+            growth_maturity.groupby("month_ts", as_index=False)["sales"]
+            .sum()
+            .sort_values("month_ts")
+            .reset_index(drop=True)
+        )
+        if gm_monthly.empty:
+            peak_month = None
+        else:
+            midx = int(pd.to_numeric(gm_monthly["sales"], errors="coerce").fillna(0.0).values.argmax())
+            peak_month = int(pd.Timestamp(gm_monthly.iloc[midx]["month_ts"]).month)
+
+    return {
+        "shape_type": shape_type,
+        "peak_week": peak_week,
+        "peak_month": peak_month,
+        "weekly_with_stage": dfw,
+        "monthly": monthly,
+    }
+
+
 def build_item_plc_rows_from_plc_sheet(plc_df: pd.DataFrame) -> List[Dict[str, Any]]:
     if plc_df is None or plc_df.empty:
         return []
@@ -441,83 +532,21 @@ def build_item_plc_rows_from_plc_sheet(plc_df: pd.DataFrame) -> List[Dict[str, A
     for _, r in plc_df.iterrows():
         item_code = str(r.get("아이템코드", "")).strip()
         item_name = str(r.get("아이템명", "")).strip() or None
+        # '평균' 행은 시트에서 아이템코드가 비어있는 경우가 많아 예외로 적재합니다.
+        if (not item_code) and (item_name == "평균"):
+            item_code = "평균"
         if not item_code:
             continue
 
-        # 1) 주차 시계열 만들기
-        series_records: List[Dict[str, Any]] = []
-        for yw in week_cols_sorted:
-            monday = parse_yearweek_to_monday(yw)
-            if pd.isna(monday):
-                continue
-            sales = clean_number(r.get(yw))
-            sales_v = 0.0 if pd.isna(sales) else float(sales)
-            series_records.append(
-                {
-                    "year_week": yw,
-                    "week_no": _week_no_from_year_week(yw),
-                    "week_start": pd.Timestamp(monday),
-                    "month_ts": pd.Timestamp(monday).to_period("M").to_timestamp(),
-                    "sales": sales_v,
-                }
-            )
-
-        if not series_records:
-            continue
-
-        dfw = pd.DataFrame(series_records).dropna(subset=["week_start"]).copy()
+        dfw = build_item_weekly_df_from_plc_row(r, week_cols_sorted)
         if dfw.empty:
             continue
 
-        dfw = dfw.sort_values("week_start").reset_index(drop=True)
-        total_sales = float(pd.to_numeric(dfw["sales"], errors="coerce").fillna(0.0).sum())
-
-        # 2) last_year_ratio_pct (해당 아이템 1년 전체 판매량 대비 주차 비중, %)
-        if total_sales > 0:
-            dfw["last_year_ratio_pct"] = (dfw["sales"] / total_sales) * 100.0
-        else:
-            dfw["last_year_ratio_pct"] = 0.0
-
-        # 3) shape_type (월별 매출로 판단)
-        monthly = (
-            dfw.groupby("month_ts", as_index=False)["sales"]
-            .sum()
-            .sort_values("month_ts")
-            .reset_index(drop=True)
-        )
-        shape_type = classify_shape_type_from_monthly(monthly["sales"].values.astype(float))
-
-        # 4) stage (주차 매출 + shape_type로 단계 부여) -> DB는 도입/성장/성숙/쇠퇴/비시즌만
-        stages_raw = classify_weekly_stage_by_shape(dfw["sales"].values.astype(float), shape_type)
-        if len(stages_raw) != len(dfw):
-            stages_raw = ["성숙"] * len(dfw)
-        dfw["stage"] = [normalize_stage_for_db(s) for s in stages_raw]
-
-        # 5) peak_week / peak_month
-        # - 성장/성숙 중 매출 최댓값 기준
-        growth_maturity = dfw[dfw["stage"].isin(["성장", "성숙"])].copy()
-        if growth_maturity.empty:
-            peak_week: Optional[int] = None
-            peak_month: Optional[int] = None
-        else:
-            idx = int(pd.to_numeric(growth_maturity["sales"], errors="coerce").fillna(0.0).values.argmax())
-            peak_row = growth_maturity.iloc[idx]
-            try:
-                peak_week = int(pd.Timestamp(peak_row["week_start"]).isocalendar().week)
-            except Exception:
-                peak_week = None
-
-            gm_monthly = (
-                growth_maturity.groupby("month_ts", as_index=False)["sales"]
-                .sum()
-                .sort_values("month_ts")
-                .reset_index(drop=True)
-            )
-            if gm_monthly.empty:
-                peak_month = None
-            else:
-                midx = int(pd.to_numeric(gm_monthly["sales"], errors="coerce").fillna(0.0).values.argmax())
-                peak_month = int(pd.Timestamp(gm_monthly.iloc[midx]["month_ts"]).month)
+        m = compute_item_metrics_from_weekly_df(dfw)
+        shape_type = m["shape_type"]
+        peak_week = m["peak_week"]
+        peak_month = m["peak_month"]
+        dfw = m["weekly_with_stage"]
 
         # 6) 행 생성 (아이템별 값은 모든 주차 행에 동일 저장)
         for _, rw in dfw.iterrows():
@@ -580,14 +609,83 @@ def sync_item_plc_from_sheet_to_supabase() -> Dict[str, Any]:
 
 
 def main() -> None:
-    st.set_page_config(page_title="item_plc 적재", layout="centered")
-    if st.button("SUPABASE item_plc 채우기", type="primary"):
+    st.set_page_config(page_title="item_plc 적재", layout="wide")
+
+    plc_df = load_plc_db_df()
+    if plc_df.empty:
+        st.error("plc db 워크시트 데이터가 비어있습니다.")
+        return
+
+    required = ["아이템명", "아이템코드"]
+    missing = [c for c in required if c not in plc_df.columns]
+    if missing:
+        st.error(f"plc db 필수 컬럼이 없습니다: {missing}")
+        return
+
+    week_cols = [c for c in plc_df.columns if re.match(r"^\d{4}-\d{1,2}$", str(c).strip())]
+    if not week_cols:
+        st.error("plc db에 2025-01 형식의 주차 컬럼이 없습니다.")
+        return
+
+    week_cols_sorted = sorted(
+        [str(c).strip() for c in week_cols],
+        key=lambda s: (int(s.split("-")[0]), int(s.split("-")[1])),
+    )
+
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        do_sync = st.button("SUPABASE item_plc 채우기", type="primary")
+    with col_right:
+        st.caption("아래 그래프는 plc db(구글시트) 기준으로 표시됩니다.")
+
+    if do_sync:
         with st.spinner("plc db → Supabase item_plc 적재 중…"):
             try:
                 r = sync_item_plc_from_sheet_to_supabase()
                 st.success(f"완료: item_plc {r['inserted']:,}행 적재 (아이템 {r['items']:,}개 기준)")
             except Exception as e:
                 st.error(f"실패: {e}")
+
+    # ---- 아이템별 그래프(전부) ----
+    st.divider()
+    st.subheader("아이템별 주차/월별 매출 그래프")
+
+    plc_df = plc_df.copy()
+    plc_df["아이템코드"] = plc_df["아이템코드"].astype(str).str.strip()
+    plc_df["아이템명"] = plc_df["아이템명"].astype(str).str.strip()
+
+    # 너무 많은 경우에도 UI가 버티도록, expander로 접어두고 렌더링합니다.
+    for i, r in plc_df.iterrows():
+        item_code = str(r.get("아이템코드", "")).strip()
+        item_name = str(r.get("아이템명", "")).strip()
+        if not item_code or item_code.lower() == "nan":
+            continue
+
+        dfw = build_item_weekly_df_from_plc_row(r, week_cols_sorted)
+        if dfw.empty:
+            continue
+
+        m = compute_item_metrics_from_weekly_df(dfw)
+        shape_type = m["shape_type"]
+        peak_week = m["peak_week"]
+        peak_month = m["peak_month"]
+        dfw2 = m["weekly_with_stage"]
+        monthly = m["monthly"]
+
+        title = f"{item_name} ({item_code})"
+        with st.expander(title, expanded=(i < 3)):
+            c1, c2, c3 = st.columns([1, 1, 1])
+            c1.metric("shape_type", shape_type or "-")
+            c2.metric("peak_week(성장/성숙)", "-" if peak_week is None else str(peak_week))
+            c3.metric("peak_month(성장/성숙)", "-" if peak_month is None else str(peak_month))
+
+            w = dfw2[["week_start", "sales", "stage"]].copy()
+            w = w.rename(columns={"week_start": "주차(월요일)", "sales": "매출"})
+            st.line_chart(w.set_index("주차(월요일)")["매출"])
+
+            if monthly is not None and not monthly.empty:
+                mdf = monthly.rename(columns={"month_ts": "월", "sales": "매출"}).copy()
+                st.bar_chart(mdf.set_index("월")["매출"])
 
 
 if __name__ == "__main__":
