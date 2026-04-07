@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 import streamlit as st
+import altair as alt
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -320,6 +321,52 @@ def normalize_stage_for_db(stage: str) -> str:
     if s in ("도입", "성장", "성숙", "쇠퇴", "비시즌"):
         return s
     return "성숙"
+
+
+def stage_color_scale() -> alt.Scale:
+    return alt.Scale(
+        domain=["도입", "성장", "성숙", "쇠퇴", "비시즌"],
+        range=["#7C3AED", "#2563EB", "#16A34A", "#DC2626", "#6B7280"],
+    )
+
+
+def build_stage_colored_sales_chart(df_weekly: pd.DataFrame) -> alt.Chart:
+    """
+    df_weekly: columns week_start(datetime), sales(float), stage(str)
+    라인을 stage 구간별로 색이 바뀌도록 segment_id로 분절해서 그립니다.
+    """
+    if df_weekly is None or df_weekly.empty:
+        return alt.Chart(pd.DataFrame({"week_start": [], "sales": [], "stage": [], "segment_id": []})).mark_line()
+
+    df = df_weekly.copy()
+    df = df.dropna(subset=["week_start"]).copy()
+    if df.empty:
+        return alt.Chart(pd.DataFrame({"week_start": [], "sales": [], "stage": [], "segment_id": []})).mark_line()
+
+    df["stage"] = df["stage"].astype(str).str.strip().replace("", "성숙")
+    # 구간 id: stage가 바뀌는 지점마다 +1
+    df["segment_id"] = (df["stage"] != df["stage"].shift(1)).cumsum().astype(int)
+
+    base = alt.Chart(df).encode(
+        x=alt.X("week_start:T", title="주차(월요일)"),
+        y=alt.Y("sales:Q", title="매출"),
+        tooltip=[
+            alt.Tooltip("week_start:T", title="주차"),
+            alt.Tooltip("sales:Q", title="매출", format=",.0f"),
+            alt.Tooltip("stage:N", title="stage"),
+        ],
+    )
+
+    line = base.mark_line(point=False, strokeWidth=3).encode(
+        color=alt.Color("stage:N", scale=stage_color_scale(), legend=alt.Legend(title="stage")),
+        detail="segment_id:N",
+    )
+
+    points = base.mark_circle(size=55, opacity=0.9).encode(
+        color=alt.Color("stage:N", scale=stage_color_scale(), legend=None),
+    )
+
+    return (line + points).properties(height=260)
 
 
 def get_gspread_client():
@@ -680,8 +727,7 @@ def main() -> None:
             c3.metric("peak_month(성장/성숙)", "-" if peak_month is None else str(peak_month))
 
             w = dfw2[["week_start", "sales", "stage"]].copy()
-            w = w.rename(columns={"week_start": "주차(월요일)", "sales": "매출"})
-            st.line_chart(w.set_index("주차(월요일)")["매출"])
+            st.altair_chart(build_stage_colored_sales_chart(w), use_container_width=True)
 
             if monthly is not None and not monthly.empty:
                 mdf = monthly.rename(columns={"month_ts": "월", "sales": "매출"}).copy()
