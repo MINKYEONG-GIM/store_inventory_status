@@ -2,8 +2,6 @@ import os
 import json
 import math
 import re
-import urllib.error
-import urllib.request
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -16,34 +14,8 @@ try:
 except ImportError:
     _create_supabase_client = None
 
-# OpenAI 월별 형태 분류 결과 캐시(동일 시계열 재호출 방지). 프로세스 단위.
-_SHAPE_OPENAI_CACHE: Dict[str, Tuple[str, str]] = {}
-
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-
 DEFAULT_REORDER_LEAD_TIME_DAYS = 21
 DEFAULT_REORDER_MINIMUM_CAPACITY = 600
-
-
-def get_gpt_gpi() -> Optional[str]:
-    """
-    Streamlit secrets의 gpt_gpi(또는 OPENAI_API_KEY) 또는 환경변수.
-    secrets.toml 예: gpt_gpi = "sk-..."
-    """
-    try:
-        if hasattr(st, "secrets"):
-            sec = st.secrets
-            if "gpt_gpi" in sec:
-                v = sec["gpt_gpi"]
-                if v is not None and str(v).strip():
-                    return str(v).strip()
-            if "OPENAI_API_KEY" in sec:
-                v = sec["OPENAI_API_KEY"]
-                if v is not None and str(v).strip():
-                    return str(v).strip()
-    except Exception:
-        pass
-    return (os.getenv("gpt_gpi") or os.getenv("OPENAI_API_KEY") or "").strip() or None
 
 
 # =========================
@@ -193,71 +165,7 @@ def parse_yearweek_to_date(yearweek: str) -> pd.Timestamp:
     except Exception:
         return pd.NaT
 
-def call_openai_chat_json(messages: List[dict], json_schema: Optional[dict] = None) -> dict:
-    """
-    Chat Completions API를 호출해서 JSON 응답을 받습니다.
-    """
-    api_key = get_gpt_gpi()
-    if not api_key:
-        raise ValueError("OpenAI API Key가 없습니다. st.secrets 또는 환경변수에 gpt_gpi / OPENAI_API_KEY를 설정하세요.")
-
-    if json_schema is None:
-        json_schema = {
-            "name": "shape_result",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "shape_label": {
-                        "type": "string",
-                        "enum": ["단봉형", "쌍봉형", "올시즌형"]
-                    },
-                    "reason": {
-                        "type": "string"
-                    }
-                },
-                "required": ["shape_label", "reason"],
-                "additionalProperties": False
-            }
-        }
-
-    payload = {
-        "model": "gpt-4.1-mini",
-        "messages": messages,
-        "temperature": 0,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                **json_schema
-            }
-        }
-    }
-
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    req = urllib.request.Request(
-        OPENAI_CHAT_URL,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
-        raise ValueError(f"OpenAI API 호출 실패: {e.code} / {body}")
-    except Exception as e:
-        raise ValueError(f"OpenAI API 호출 중 오류: {str(e)}")
-
-    content = result["choices"][0]["message"]["content"]
-    return json.loads(content)
-
-
-def forecast_with_gpt(
+def forecast_by_ratio(
     item_name: str,
     shape_label: str,
     weekly_df: pd.DataFrame,
@@ -378,7 +286,6 @@ def forecast_with_gpt(
 def classify_shape(
     item_name: str,
     monthly_df: pd.DataFrame,
-    use_openai: bool = True,
 ) -> Tuple[str, str]:
     if monthly_df.empty:
         return "판단불가", "월별 데이터가 없습니다."
@@ -391,97 +298,18 @@ def classify_shape(
     y_smooth = smooth_series(y, window=2)
     month_labels = monthly_df["month"].dt.strftime("%Y-%m").tolist()
 
-    if not use_openai:
-        is_double, double_peaks = is_double_peak(y_smooth)
-        if is_double:
-            return "쌍봉형", f"로직 판별: 의미 있는 피크 2개 ({[month_labels[i] for i in double_peaks]})"
-
-        is_single, single_peaks = is_single_peak(y_smooth)
-        if is_single:
-            return "단봉형", f"로직 판별: 의미 있는 피크 1개 ({[month_labels[i] for i in single_peaks]})"
-
-        if is_all_season(y_smooth):
-            return "올시즌형", "로직 판별: 큰 피크 없이 전체적으로 고르게 분포"
-
-        return "단봉형", "로직 미확정으로 단봉형 fallback"
-
-    cache_key = json.dumps(
-        {
-            "n": item_name.strip(),
-            "m": month_labels,
-            "y": [round(float(v), 6) for v in y],
-            "s": [round(float(v), 4) for v in y_smooth],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    if cache_key in _SHAPE_OPENAI_CACHE:
-        return _SHAPE_OPENAI_CACHE[cache_key]
-
-    prompt = f"""
-
-    
-아이템의 월별 매출 형태를 아래 3개 중 하나로만 판단하라.
-
-- 반드시 월별 매출 기준으로만 판단할 것
-- 주차별 매출은 참고하지 말 것
-
-분류 순서
-1. 쌍봉형
-2. 단봉형
-3. 올시즌형
-
-판단 기준
-- 쌍봉형: 의미 있는 피크가 2개 이상이고, 두 피크 사이에 저점이 존재함
-- 단봉형: 의미 있는 큰 피크가 1개임
-- 올시즌형: 큰 중심 피크 없이 전체 기간에 비교적 고르게 분포함
-
-주의
-- 반드시 월별 매출 기준으로만 판단할 것
-- 주차별 매출은 참고하지 말 것
-- 작은 잡음은 피크로 보지 말 것
-- 반드시 3개 중 하나만 선택할 것
-- reason은 짧고 명확한 한글로 작성할 것
-
-아이템명: {item_name}
-월 라벨: {month_labels}
-월별 매출: {[float(v) for v in y]}
-스무딩 값: {[round(float(v), 2) for v in y_smooth]}
-""".strip()
-
-    messages = [
-        {
-            "role": "developer",
-            "content": "너는 월별 매출 형태를 쌍봉형, 단봉형, 올시즌형 중 하나로만 분류하는 분석가다. 반드시 JSON만 반환한다. 반드시 월별 매출 기준으로만 판단한다."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-
-    # 1차 판단: GPT
-    try:
-        result = call_openai_chat_json(messages)
-        out = (result["shape_label"], f"GPT 1차 판별: {result['reason']}")
-        _SHAPE_OPENAI_CACHE[cache_key] = out
-        return out
-    except Exception:
-        pass
-
-    # 2차 fallback: 로직
     is_double, double_peaks = is_double_peak(y_smooth)
     if is_double:
-        return "쌍봉형", f"GPT 실패, 로직 fallback: 의미 있는 피크 2개 ({[month_labels[i] for i in double_peaks]})"
+        return "쌍봉형", f"로직 판별: 의미 있는 피크 2개 ({[month_labels[i] for i in double_peaks]})"
 
     is_single, single_peaks = is_single_peak(y_smooth)
     if is_single:
-        return "단봉형", f"GPT 실패, 로직 fallback: 의미 있는 피크 1개 ({[month_labels[i] for i in single_peaks]})"
+        return "단봉형", f"로직 판별: 의미 있는 피크 1개 ({[month_labels[i] for i in single_peaks]})"
 
     if is_all_season(y_smooth):
-        return "올시즌형", "GPT 실패, 로직 fallback: 큰 피크 없이 전체적으로 고르게 분포"
+        return "올시즌형", "로직 판별: 큰 피크 없이 전체적으로 고르게 분포"
 
-    return "단봉형", "GPT 실패 및 로직 미확정으로 단봉형 fallback"
+    return "단봉형", "로직 미확정으로 단봉형 fallback"
 
 # =========================
 # 구글 시트 로딩 함수
@@ -778,47 +606,6 @@ def load_raw_file_df_from_supabase(client) -> pd.DataFrame:
     return normalize_raw_file_columns_for_prepare_final(df)
 
 
-def get_sku_forecast_run_sku_column_name() -> str:
-    """
-    sku_forecast_run 테이블의 SKU 컬럼 PostgREST 이름.
-    대시보드에 'SKU'로 보이면 API도 'SKU'인 경우가 많고, 소문자 'sku'인 경우도 있습니다.
-    secrets.toml [supabase] sku_forecast_sku_column = "sku" | "SKU"
-    환경변수 SUPABASE_SKU_FORECAST_SKU_COLUMN
-    """
-    try:
-        if hasattr(st, "secrets") and "supabase" in st.secrets:
-            v = st.secrets["supabase"].get("sku_forecast_sku_column")
-            if v is not None and str(v).strip():
-                return str(v).strip()
-    except Exception:
-        pass
-    env_v = (os.getenv("SUPABASE_SKU_FORECAST_SKU_COLUMN") or "").strip()
-    if env_v:
-        return env_v
-    # Supabase UI로 만든 "SKU" 컬럼은 DB에 대문자 식별자로 남는 경우가 많음(오류: sku does not exist).
-    return "SKU"
-
-
-def omit_none_values(d: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in d.items() if v is not None}
-
-
-def sanitize_sku_forecast_run_row(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """peak_week/month를 Python int로, None 값 제거."""
-    out: Dict[str, Any] = {}
-    for k, v in rec.items():
-        if v is None:
-            continue
-        if k in ("peak_week", "peak_month"):
-            try:
-                out[k] = int(v)
-            except (TypeError, ValueError):
-                continue
-        else:
-            out[k] = v
-    return out
-
-
 def build_sku_weekly_forecast_rows(
     compare_table_df: pd.DataFrame,
     sku: str,
@@ -832,7 +619,7 @@ def build_sku_weekly_forecast_rows(
 ) -> List[Dict[str, Any]]:
     """
     화면 비교표(주차별)를 Supabase `sku_weekly_forecast` 테이블 컬럼에 맞게 변환합니다.
-    - sale_qty: 화면의「올해 해당 주차 판매량 (장)」(실적 + 미래주 GPT 예측 반영값)
+    - sale_qty: 화면의「올해 해당 주차 판매량 (장)」(실적 + 미래주 비중 예측 반영값)
     - is_forecast: 해당 행 ISO 주차가 오늘 기준 이번 주보다 뒤이면 True(예측 판매량), 이번 주·과거면 False
     - begin_stock: `apply_forecast_and_inventory_to_compare_table`까지 반영된 표의「기초재고」(주차별 롤링·클립과 동일)
     - loss: 동일 표의「로스」열과 동일(기초재고 계산 로직은 변경 없음)
@@ -941,85 +728,6 @@ def peak_week_month_from_weekly_df(weekly_df: pd.DataFrame) -> Tuple[Optional[in
         return peak_week, peak_month
     except Exception:
         return None, None
-
-
-def build_sku_forecast_run_payload(
-    *,
-    sku: str,
-    sku_name: str,
-    style_code: str,
-    plant: str,
-    store_name: str,
-    shape_type: str,
-    peak_week: Optional[int],
-    peak_month: Optional[int],
-) -> Dict[str, Any]:
-    """
-    Supabase sku_forecast_run 1건. SKU 컬럼 키는 get_sku_forecast_run_sku_column_name()와 동일해야 함.
-    """
-    sk_col = get_sku_forecast_run_sku_column_name()
-    sku_s = str(sku).strip()
-    plant_s = str(plant).strip() if plant else "전체"
-    rec: Dict[str, Any] = {
-        sk_col: sku_s,
-        "sku_name": str(sku_name).strip(),
-        "style_code": (str(style_code).strip() if style_code is not None else "") or None,
-        "plant": plant_s,
-        "store_name": str(store_name).strip() if store_name else plant_s,
-        "shape_type": (str(shape_type).strip() if shape_type else "") or None,
-        "peak_week": int(peak_week) if peak_week is not None else None,
-        "peak_month": int(peak_month) if peak_month is not None else None,
-    }
-    return omit_none_values(rec)
-
-
-def sync_sku_forecast_run_to_supabase(
-    client,
-    payload: Dict[str, Any],
-    sku: str,
-    plant: str,
-) -> None:
-    """
-    동일 SKU·plant 기존 행을 삭제한 뒤 1건 삽입합니다.
-    RLS 사용 시: anon 키로는 DELETE가 SELECT 정책에 막혀 0건만 지워질 수 있어 중복·실패가 납니다.
-    secrets에 service_role_key를 두는 것을 권장합니다.
-    """
-    sku_s = str(sku).strip()
-    plant_s = str(plant).strip() if plant else "전체"
-    sk_col = get_sku_forecast_run_sku_column_name()
-    clean = sanitize_sku_forecast_run_row(dict(payload))
-    tbl = client.table("sku_forecast_run")
-    try:
-        tbl.delete().eq(sk_col, sku_s).eq("plant", plant_s).execute()
-        if clean:
-            tbl.insert(clean).execute()
-    except Exception as e:
-        raise RuntimeError(
-            f"sku_forecast_run 저장 실패: {e!s}. "
-            f"확인: (1) service_role_key로 RLS 우회 "
-            f"(2) RLS 사용 시 sku_forecast_run에 INSERT·DELETE·SELECT 정책 "
-            f"(3) 컬럼이 소문자 sku면 secrets에 sku_forecast_sku_column = \"sku\" "
-            f"(4) id에 identity/bigserial/default nextval 설정"
-        ) from e
-
-
-def clear_sku_forecast_run_table(client) -> None:
-    sk_col = get_sku_forecast_run_sku_column_name()
-    sentinel = "\uffff\uffff__never_match_sku__\uffff\uffff"
-    client.table("sku_forecast_run").delete().neq(sk_col, sentinel).execute()
-
-
-def bulk_insert_sku_forecast_run_rows(
-    client,
-    rows: List[Dict[str, Any]],
-    batch_size: int = 200,
-) -> None:
-    if not rows:
-        return
-    tbl = client.table("sku_forecast_run")
-    for i in range(0, len(rows), batch_size):
-        chunk = [sanitize_sku_forecast_run_row(dict(r)) for r in rows[i : i + batch_size]]
-        tbl.insert(chunk).execute()
 
 
 # ----- Google Sheets → Supabase: center_stock, reorder -----
@@ -1287,7 +995,6 @@ def build_compare_table_for_final_option(
     selected_item_code: str,
     selected_plant: str,
     this_year: int,
-    use_openai_shape: bool,
     apply_ratio_forecast: bool,
 ) -> Optional[Tuple[pd.DataFrame, str, Optional[int], Optional[int]]]:
     """
@@ -1311,9 +1018,7 @@ def build_compare_table_for_final_option(
     except ValueError:
         return None
 
-    shape_label, _shape_reason = classify_shape(
-        item_name, monthly_df, use_openai=use_openai_shape
-    )
+    shape_label, _shape_reason = classify_shape(item_name, monthly_df)
     weekly_df = classify_weekly_stages_by_shape(weekly_df, shape_label)
 
     compare_table_df = build_year_compare_table(
@@ -1326,7 +1031,7 @@ def build_compare_table_for_final_option(
 
     if apply_ratio_forecast:
         try:
-            forecast_df = forecast_with_gpt(
+            forecast_df = forecast_by_ratio(
                 item_name,
                 shape_label,
                 weekly_df,
@@ -1347,9 +1052,27 @@ def build_compare_table_for_final_option(
 
 
 def load_plc_df() -> pd.DataFrame:
-    sheets_cfg = get_sheets_config()
-    plc_sheet = sheets_cfg.get("plc_db") or "plc db"
-    return load_sheet_as_df(plc_sheet)
+    """
+    Supabase `item_plc` 테이블에서 PLC(작년 주차별 판매 기준) 데이터를 로드합니다.
+
+    지원 형태(둘 다 허용):
+    - wide: 아이템코드/아이템명 + '2025-01' 같은 주차 컬럼들이 가로로 존재
+    - long: (아이템코드, year_week, sales) 형태로 세로로 존재
+    """
+    sb_client = get_supabase_client()
+    if sb_client is None:
+        raise RuntimeError(
+            "PLC 데이터는 Supabase의 item_plc 테이블에서 읽습니다. "
+            "secrets에 [supabase] url·service_role_key(또는 anon_key)를 설정하세요."
+        )
+    records = fetch_supabase_table_all_rows(
+        sb_client,
+        "item_plc",
+        batch_size=2000,
+        select="*",
+        order_by=None,
+    )
+    return pd.DataFrame(records) if records else pd.DataFrame()
 
 
 def load_final_df() -> pd.DataFrame:
@@ -1512,15 +1235,87 @@ def prepare_plc_item_timeseries(
     - monthly_df
     """
     df = plc_df.copy()
+    item_code_key = str(item_code).strip()
+    if df.empty:
+        raise ValueError("item_plc 데이터가 비어있습니다.")
 
+    # 1) long format 지원: (아이템코드/item_code, year_week, sales)
+    col_map_candidates = {
+        "아이템코드": ["아이템코드", "item_code", "item_cd", "code"],
+        "아이템명": ["아이템명", "item_name", "name"],
+        "year_week": ["year_week", "yearweek", "yw", "week", "year_week_label"],
+        "sales": ["sales", "sale", "qty", "quantity", "plc", "value"],
+    }
+    inv = {str(c).strip().lower(): c for c in df.columns}
+
+    def _pick_col(keys: List[str]) -> Optional[str]:
+        for k in keys:
+            c = inv.get(str(k).strip().lower())
+            if c is not None:
+                return c
+        return None
+
+    long_item_code_col = _pick_col(col_map_candidates["아이템코드"])
+    long_yw_col = _pick_col(col_map_candidates["year_week"])
+    long_sales_col = _pick_col(col_map_candidates["sales"])
+    long_name_col = _pick_col(col_map_candidates["아이템명"])
+
+    looks_long = long_item_code_col is not None and long_yw_col is not None and long_sales_col is not None
+
+    if looks_long:
+        t = df.copy()
+        t[long_item_code_col] = t[long_item_code_col].astype(str).str.strip()
+        t[long_yw_col] = t[long_yw_col].astype(str).str.strip()
+        t[long_sales_col] = t[long_sales_col].apply(clean_number).fillna(0.0)
+
+        matched = t[t[long_item_code_col] == item_code_key].copy()
+        fallback_used = False
+        if matched.empty:
+            matched = t[t[long_item_code_col] == "평균"].copy()
+            fallback_used = True
+        if matched.empty:
+            raise ValueError(
+                f"item_plc에서 아이템코드 '{item_code_key}'도 없고, fallback용 '평균'도 없습니다."
+            )
+
+        if long_name_col is not None and not fallback_used:
+            item_name = str(matched.iloc[0][long_name_col]).strip()
+        else:
+            item_name = f"{item_code_key} (평균기준)" if fallback_used else item_code_key
+
+        records = []
+        for _, r in matched.iterrows():
+            yw = str(r[long_yw_col]).strip()
+            week_start = parse_yearweek_to_date(yw)
+            if pd.isna(week_start):
+                continue
+            records.append(
+                {"year_week": yw, "week_start": week_start, "sales": float(r[long_sales_col] or 0.0)}
+            )
+
+        weekly_df = pd.DataFrame(records).sort_values("week_start").reset_index(drop=True)
+        if weekly_df.empty:
+            raise ValueError(f"아이템코드 '{item_code_key}'의 주차 데이터가 없습니다.")
+
+        weekly_df["month"] = weekly_df["week_start"].dt.to_period("M").dt.to_timestamp()
+        monthly_df = (
+            weekly_df.groupby("month", as_index=False)["sales"]
+            .sum()
+            .sort_values("month")
+            .reset_index(drop=True)
+        )
+        return item_name, weekly_df, monthly_df
+
+    # 2) wide format(기존 plc db 시트 형태)
     required_cols = ["아이템명", "아이템코드"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-        raise ValueError(f"plc db 필수 컬럼이 없습니다: {missing}")
+        raise ValueError(
+            f"item_plc 테이블에 필수 컬럼이 없습니다: {missing}. "
+            f"(또는 long format 컬럼 year_week/sales/item_code가 필요합니다)"
+        )
 
     df["아이템코드"] = df["아이템코드"].astype(str).str.strip()
-    item_code_key = str(item_code).strip()
-
     matched = df[df["아이템코드"] == item_code_key].copy()
 
     fallback_used = False
@@ -1530,19 +1325,15 @@ def prepare_plc_item_timeseries(
 
     if matched.empty:
         raise ValueError(
-            f"plc db에서 아이템코드 '{item_code_key}'도 없고, fallback용 '평균' 행도 없습니다."
+            f"item_plc에서 아이템코드 '{item_code_key}'도 없고, fallback용 '평균' 행도 없습니다."
         )
 
     row = matched.iloc[0]
-
-    if fallback_used:
-        item_name = f"{item_code_key} (평균기준)"
-    else:
-        item_name = str(row["아이템명"]).strip()
+    item_name = f"{item_code_key} (평균기준)" if fallback_used else str(row["아이템명"]).strip()
 
     week_cols = [c for c in df.columns if re.match(r"^\d{4}-\d{1,2}$", str(c).strip())]
     if not week_cols:
-        raise ValueError("plc db에 2025-01 형식의 주차 컬럼이 없습니다.")
+        raise ValueError("item_plc에 2025-01 형식의 주차 컬럼이 없습니다.")
 
     records = []
     for col in week_cols:
@@ -1550,26 +1341,19 @@ def prepare_plc_item_timeseries(
         week_start = parse_yearweek_to_date(col)
         if pd.isna(week_start):
             continue
-
-        records.append({
-            "year_week": col,
-            "week_start": week_start,
-            "sales": 0 if pd.isna(sales) else float(sales)
-        })
+        records.append({"year_week": col, "week_start": week_start, "sales": 0.0 if pd.isna(sales) else float(sales)})
 
     weekly_df = pd.DataFrame(records).sort_values("week_start").reset_index(drop=True)
     if weekly_df.empty:
         raise ValueError(f"아이템코드 '{item_code_key}'의 주차 데이터가 없습니다.")
 
     weekly_df["month"] = weekly_df["week_start"].dt.to_period("M").dt.to_timestamp()
-
     monthly_df = (
         weekly_df.groupby("month", as_index=False)["sales"]
         .sum()
         .sort_values("month")
         .reset_index(drop=True)
     )
-
     return item_name, weekly_df, monthly_df
 
 
@@ -2221,9 +2005,9 @@ def _persist_compare_extras_from_secrets() -> bool:
 
 def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     """
-    sku_weekly_forecast, sku_forecast_run 두 테이블만 전면 갱신합니다.
+    sku_weekly_forecast 테이블만 전면 갱신합니다.
     RAW FILE에 나타난 (SKU/MATERIAL × 매장 plant_name) 조합마다 계산 후 일괄 INSERT.
-    매출 형태(단봉/쌍봉 등)는 OpenAI(classify_shape use_openai=True)로 판별합니다.
+    매출 형태(단봉/쌍봉 등)는 로직으로만 판별합니다.
     """
     if _create_supabase_client is None:
         raise RuntimeError("supabase 패키지가 필요합니다. pip install supabase")
@@ -2281,13 +2065,10 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     extras_on = _persist_compare_extras_from_secrets()
 
     clear_sku_weekly_forecast_table(sb_client)
-    clear_sku_forecast_run_table(sb_client)
 
     weekly_row_total = 0
     weekly_buffer: List[Dict[str, Any]] = []
-    run_buffer: List[Dict[str, Any]] = []
     weekly_flush_at = 3000
-    run_flush_at = 500
 
     def _flush_weekly_partial() -> None:
         nonlocal weekly_buffer, weekly_row_total
@@ -2296,13 +2077,6 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         bulk_insert_sku_weekly_forecast_rows(sb_client, weekly_buffer)
         weekly_row_total += len(weekly_buffer)
         weekly_buffer = []
-
-    def _flush_run_partial() -> None:
-        nonlocal run_buffer
-        if not run_buffer:
-            return
-        bulk_insert_sku_forecast_run_rows(sb_client, run_buffer)
-        run_buffer = []
 
     skipped_notes: List[str] = []
     success_combos = 0
@@ -2330,7 +2104,6 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
             selected_item_code=mat_item_code,
             selected_plant=mat_plant,
             this_year=this_year,
-            use_openai_shape=True,
             apply_ratio_forecast=True,
         )
         if built is None:
@@ -2359,28 +2132,12 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         weekly_buffer.extend(rows_part)
         if len(weekly_buffer) >= weekly_flush_at:
             _flush_weekly_partial()
-        run_buffer.append(
-            build_sku_forecast_run_payload(
-                sku=mat_sku,
-                sku_name=mat_sku_name,
-                style_code=mat_style_code,
-                plant=plant_for_db,
-                store_name=store_for_db,
-                shape_type=shape_lbl,
-                peak_week=peak_w,
-                peak_month=peak_m,
-            )
-        )
-        if len(run_buffer) >= run_flush_at:
-            _flush_run_partial()
         success_combos += 1
 
     _flush_weekly_partial()
-    _flush_run_partial()
 
     return {
         "weekly_row_count": weekly_row_total,
-        "run_row_count": success_combos,
         "combo_count": len(sku_store_combos),
         "success_combos": success_combos,
         "skipped": skipped_notes,
@@ -2388,22 +2145,20 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
 
 
 def main() -> None:
-    """차트·비교표 없음. '데이터 넣기' 버튼으로 두 테이블만 갱신."""
+    """차트·비교표 없음. '데이터 넣기' 버튼으로 sku_weekly_forecast만 갱신."""
     st.set_page_config(page_title="Forecast DB 동기화", layout="centered")
     if st.button("테이블에 데이터 넣기", type="primary"):
-        with st.spinner("RAW SKU×매장 조합 처리 중(OpenAI 형태 분류 포함)…"):
+        with st.spinner("RAW SKU×매장 조합 처리 중…"):
             try:
                 r = sync_forecast_tables_to_supabase()
                 print(
                     f"[forecast_sync] weekly_rows={r['weekly_row_count']} "
-                    f"run_rows={r['run_row_count']} combos={r['combo_count']} "
                     f"ok={r['success_combos']} skipped={len(r['skipped'])}"
                 )
                 if r["skipped"]:
                     print("[forecast_sync] skip_sample:", r["skipped"][:20])
                 st.success(
-                    f"완료: sku_weekly_forecast {r['weekly_row_count']:,}행, "
-                    f"sku_forecast_run {r['run_row_count']:,}건 "
+                    f"완료: sku_weekly_forecast {r['weekly_row_count']:,}행 "
                     f"(성공 조합 {r['success_combos']}/{r['combo_count']}, 건너뜀 {len(r['skipped'])}). "
                     "상세는 서버 로그(print)를 확인하세요."
                 )
