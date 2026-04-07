@@ -6,11 +6,9 @@ import urllib.error
 import urllib.request
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from streamlit_gsheets import GSheetsConnection
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -1212,14 +1210,12 @@ def build_compare_table_for_final_option(
     return out, shape_label, peak_w, peak_m
 
 
-@st.cache_data(ttl=300)
 def load_plc_df() -> pd.DataFrame:
     sheets_cfg = get_sheets_config()
     plc_sheet = sheets_cfg.get("plc_db") or "plc db"
     return load_sheet_as_df(plc_sheet)
 
 
-@st.cache_data(ttl=300)
 def load_final_df() -> pd.DataFrame:
     """
     올해 실적 등 final 계열 데이터는 Supabase 테이블(기본 이름 `RAW FILE`, [supabase].raw_file_table로 변경 가능)에서 읽습니다.
@@ -1234,7 +1230,6 @@ def load_final_df() -> pd.DataFrame:
     return load_raw_file_df_from_supabase(client)
 
 
-@st.cache_data(ttl=300)
 def load_reorder_df() -> pd.DataFrame:
     sheets_cfg = get_sheets_config()
     reorder_sheet = sheets_cfg.get("reorder") or "reorder"
@@ -1365,44 +1360,9 @@ def load_sheet_as_df(worksheet_name: str) -> pd.DataFrame:
     return pd.DataFrame(normalized_rows, columns=headers)
 
 
-@st.cache_data(ttl=300)
-def load_sheet_data() -> pd.DataFrame:
-    sheets_cfg = get_sheets_config()
-
-    sheet_id = sheets_cfg.get("sheet_id")
-    worksheet_name = (
-        sheets_cfg.get("WORKSHEET_NAME")
-        or sheets_cfg.get("worksheet")
-        or sheets_cfg.get("forecast_base_sheet")
-        or "plc db"
-    )
-
-    if not sheet_id:
-        raise ValueError("secrets.toml의 [sheets].sheet_id 가 비어있습니다.")
-
-    return load_sheet_as_df(worksheet_name)
-
-
 # =========================
 # 데이터 전처리
 # =========================
-def get_item_columns(df: pd.DataFrame) -> List[str]:
-    """
-    아이템 선택용 컬럼 목록 반환
-    '연도/주'를 제외한 컬럼 중 값이 있는 컬럼만 반환
-    """
-    exclude_cols = {"연도/주", "", " "}
-    candidate_cols = [c for c in df.columns if str(c).strip() not in exclude_cols]
-
-    item_cols = []
-    for col in candidate_cols:
-        series = df[col].astype(str).str.strip().replace("", np.nan)
-        if series.notna().any():
-            item_cols.append(col)
-
-    return item_cols
-
-
 def prepare_plc_item_timeseries(
     plc_df: pd.DataFrame,
     item_code: str
@@ -1477,152 +1437,6 @@ def prepare_plc_item_timeseries(
     return item_name, weekly_df, monthly_df
 
 
-def get_final_item_options(final_df: pd.DataFrame) -> pd.DataFrame:
-    df = prepare_final_df(final_df).copy()
-
-    # plant_name + sku_name + item_code 기준으로 유니크
-    options = (
-        df[["plant_name", "sku_name", "item_code", "sku", "style_code"]]
-        .dropna(subset=["sku_name", "plant_name"])
-        .drop_duplicates()
-        .sort_values(["plant_name", "style_code", "sku_name", "sku"])
-        .reset_index(drop=True)
-    )
-    return options
-
-
-# =========================
-# 차트 생성
-# =========================
-def build_dual_line_chart(
-    item_name: str,
-    weekly_df: pd.DataFrame,
-    monthly_df: pd.DataFrame
-) -> go.Figure:
-    fig = go.Figure()
-
-    weekly_week_no = weekly_df["week_start"].dt.isocalendar().week.astype(int)
-
-    # 주차별 판매량 연결선
-    fig.add_trace(
-        go.Scatter(
-            x=weekly_df["week_start"],
-            y=weekly_df["sales"],
-            mode="lines",
-            name="주차별 판매량(연결선)",
-            line=dict(color="#b0b0b0", width=2),
-            hoverinfo="skip",
-            showlegend=False,
-            connectgaps=True,
-        )
-    )
-
-    # 주차별 단계별 색상 선
-    stage_df = weekly_df.copy().reset_index(drop=True)
-    stage_df["week_no"] = stage_df["week_start"].dt.isocalendar().week.astype(int)
-
-    if "stage" in stage_df.columns:
-        current_stage = None
-        segment_x = []
-        segment_y = []
-        segment_week = []
-
-        for i, row in stage_df.iterrows():
-            stage = row["stage"]
-            x = row["week_start"]
-            y = row["sales"]
-            w = int(row["week_no"])
-
-            if current_stage is None:
-                current_stage = stage
-                segment_x = [x]
-                segment_y = [y]
-                segment_week = [w]
-            elif stage == current_stage:
-                segment_x.append(x)
-                segment_y.append(y)
-                segment_week.append(w)
-            else:
-                fig.add_trace(
-                    go.Scatter(
-                        x=segment_x,
-                        y=segment_y,
-                        customdata=segment_week,
-                        mode="lines+markers",
-                        name=current_stage,
-                        line=dict(color=STAGE_COLORS.get(current_stage, "#333"), width=3),
-                        marker=dict(size=7),
-                        hovertemplate="주차: %{customdata}주차<br>주차 시작일: %{x|%Y-%m-%d}<br>판매량: %{y:,.0f}<br>단계: " + current_stage + "<extra></extra>",
-                        showlegend=True
-                    )
-                )
-                current_stage = stage
-                segment_x = [x]
-                segment_y = [y]
-                segment_week = [w]
-
-        # 마지막 구간
-        if segment_x:
-            fig.add_trace(
-                go.Scatter(
-                    x=segment_x,
-                    y=segment_y,
-                    customdata=segment_week,
-                    mode="lines+markers",
-                    name=current_stage,
-                    line=dict(color=STAGE_COLORS.get(current_stage, "#333"), width=3),
-                    marker=dict(size=7),
-                    hovertemplate="주차: %{customdata}주차<br>주차 시작일: %{x|%Y-%m-%d}<br>판매량: %{y:,.0f}<br>단계: " + current_stage + "<extra></extra>",
-                    showlegend=True
-                )
-            )
-
-    # 월별 매출
-    fig.add_trace(
-        go.Scatter(
-            x=monthly_df["month"],
-            y=monthly_df["sales"],
-            customdata=monthly_df["month"].dt.isocalendar().week.astype(int),
-            mode="lines+markers",
-            name="월별 매출",
-            line=dict(width=3, color="#bfbfbf"),
-            marker=dict(size=7, color="#bfbfbf"),
-            fill="tozeroy",
-            fillcolor="rgba(191, 191, 191, 0.25)",
-            connectgaps=True,
-            yaxis="y2",
-            hovertemplate="월: %{x|%Y-%m}<br>(참고) %{customdata}주차<br>매출: %{y:,.0f}<extra></extra>",
-        )
-    )
-
-    fig.update_layout(
-        title=f"{item_name} 주차별 단계 / 월별 형태 기준 매출 추이",
-        xaxis_title="날짜",
-        yaxis_title="주차별 판매량",
-        yaxis2=dict(
-            title="월별 매출",
-            overlaying="y",
-            side="right",
-            showgrid=False
-        ),
-        height=650,
-        hovermode="x unified",
-        margin=dict(l=30, r=30, t=70, b=30),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-    )
-
-    fig.update_yaxes(tickformat=",.0f", rangemode="tozero")
-    fig.update_layout(
-        yaxis=dict(rangemode="tozero"),
-        yaxis2=dict(rangemode="tozero"),
-    )
-    return fig
 # =========================
 # 월별 매출 형태 판별 (단봉 / 다봉)
 # =========================
@@ -2256,641 +2070,186 @@ def build_year_compare_table(
 
 
 # =========================
-# 메인 화면
+# Supabase 동기화 (버튼만 — 차트·비교표 UI 없음)
 # =========================
 
-STAGE_COLORS = {
-    "도입": "#1f77b4",   # 파랑
-    "성장": "#2ca02c",   # 초록
-    "피크": "#d62728",   # 빨강
-    "피크2": "#d62728",  # 빨강
-    "성숙": "#9467bd",   # 보라
-    "비시즌": "#7f7f7f", # 회색
-    "쇠퇴": "#8c564b",   # 갈색
-}
+
+def _persist_compare_extras_from_secrets() -> bool:
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            return bool(st.secrets["supabase"].get("persist_compare_table_extras", False))
+    except Exception:
+        pass
+    return False
 
 
-def main():
-    st.set_page_config(page_title="아이템 매출 추이", layout="wide")
+def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
+    """
+    sku_weekly_forecast, sku_forecast_run 두 테이블만 전면 갱신합니다.
+    RAW FILE에 나타난 (SKU/MATERIAL × 매장 plant_name) 조합마다 계산 후 일괄 INSERT.
+    매출 형태(단봉/쌍봉 등)는 OpenAI(classify_shape use_openai=True)로 판별합니다.
+    """
+    if _create_supabase_client is None:
+        raise RuntimeError("supabase 패키지가 필요합니다. pip install supabase")
+
+    sb_client = get_supabase_client()
+    if sb_client is None:
+        raise RuntimeError(
+            "Supabase 연결 정보가 없습니다. Streamlit secrets [supabase] url·service_role_key를 설정하세요."
+        )
 
     plc_df = load_plc_df()
-
-    try:
-        final_df = load_final_df()
-    except Exception as e:
-        tbl_hint = get_raw_file_table_name()
-        st.error(
-            f"Supabase에서 final 데이터 테이블 `{tbl_hint}` 를 불러오지 못했습니다.\n\n"
-            f"**오류 유형:** `{type(e).__name__}`  \n"
-            f"**메시지:** {e}\n\n"
-            "점검: Streamlit Secrets의 `[supabase] url`·`service_role_key`(또는 anon), "
-            f"선택 `raw_file_table`(기본 `RAW FILE`, 공백·대소문자는 Supabase와 동일하게), "
-            "테이블 RLS의 **SELECT** 허용."
-        )
-        st.stop()
-
-    try:
-        reorder_df = load_reorder_df()
-    except Exception as e:
-        reorder_df = pd.DataFrame()
-        st.warning(f"reorder 시트를 불러오지 못했습니다: {e}")
-
     if plc_df.empty:
-        st.warning("plc db 데이터가 없습니다.")
-        return
+        raise RuntimeError("plc db 데이터가 없습니다.")
 
+    final_df = load_final_df()
     if final_df.empty:
-        st.warning("final 데이터가 없습니다.")
-        return
+        raise RuntimeError("final(RAW FILE) 데이터가 없습니다.")
+
+    try:
+        load_reorder_df()
+    except Exception:
+        pass
 
     final_prepared = prepare_final_df(final_df)
     discount_lookup = discount_rate_lookup_by_store_sku(final_prepared)
 
-    all_material_options = (
+    sku_store_combos = (
         final_prepared[["plant_name", "sku_name", "item_code", "sku", "style_code"]]
         .dropna(subset=["sku"])
         .copy()
     )
-    all_material_options["plant_name"] = (
-        all_material_options["plant_name"].fillna("").astype(str).str.strip().replace("", "전체")
+    sku_store_combos["plant_name"] = (
+        sku_store_combos["plant_name"].fillna("").astype(str).str.strip().replace("", "전체")
     )
-    all_material_options["sku"] = all_material_options["sku"].astype(str).str.strip()
-    all_material_options["sku_name"] = (
-        all_material_options["sku_name"].fillna("").astype(str).str.strip()
+    sku_store_combos["sku"] = sku_store_combos["sku"].astype(str).str.strip()
+    sku_store_combos["sku_name"] = (
+        sku_store_combos["sku_name"].fillna("").astype(str).str.strip()
     )
-    all_material_options["item_code"] = (
-        all_material_options["item_code"].fillna("").astype(str).str.strip()
+    sku_store_combos["item_code"] = (
+        sku_store_combos["item_code"].fillna("").astype(str).str.strip()
     )
-    all_material_options["style_code"] = (
-        all_material_options["style_code"].fillna("").astype(str).str.strip()
+    sku_store_combos["style_code"] = (
+        sku_store_combos["style_code"].fillna("").astype(str).str.strip()
     )
-    all_material_options = (
-        all_material_options[["sku", "sku_name", "item_code", "style_code"]]
-        .drop_duplicates(subset=["sku"])
+    sku_store_combos = (
+        sku_store_combos.drop_duplicates(subset=["plant_name", "sku"])
         .reset_index(drop=True)
     )
 
-    options_df = get_final_item_options(final_prepared)
-
-    if options_df.empty:
-        st.warning("final에서 선택 가능한 SKU 데이터가 없습니다.")
-        return
-
-    # 표시용 라벨(상품 선택 드롭다운에는 매장명 미포함)
-    options_df["display_label"] = options_df.apply(
-        lambda r: f"{r['sku_name']} | 코드:{r['item_code']} | SKU:{r['sku']}",
-        axis=1
-    )
-    # 내부 식별용 키(전체 매장일 때도 선택이 겹치지 않도록)
-    options_df["option_id"] = options_df.apply(
-        lambda r: f"{r['plant_name']}||{r['sku']}",
-        axis=1
-    )
-
-    col_a, col_b, col_c = st.columns([1, 1, 2])
-
-    with col_a:
-        plant_values = options_df["plant_name"].dropna().astype(str).str.strip()
-        plant_values = plant_values[plant_values != ""]
-        plant_options = ["전체"] + sorted([p for p in plant_values.unique().tolist() if p != "전체"])
-
-        selected_plant = st.selectbox(
-            "매장 선택",
-            options=plant_options
-        )
-
-    plant_filtered = options_df.copy()
-    if selected_plant != "전체":
-        plant_filtered = plant_filtered[plant_filtered["plant_name"] == selected_plant].copy()
-
-    style_vals = plant_filtered["style_code"].dropna().astype(str).str.strip()
-    style_vals = style_vals[style_vals != ""]
-    style_options = ["전체"] + sorted(style_vals.unique().tolist())
-
-    with col_b:
-        selected_style = st.selectbox(
-            "스타일코드 (MATERIAL 앞 10자리)",
-            options=style_options,
-        )
-
-    with col_c:
-        filtered_options_df = plant_filtered.copy()
-        if selected_style != "전체":
-            filtered_options_df = filtered_options_df[
-                filtered_options_df["style_code"].astype(str).str.strip() == selected_style
-            ].copy()
-
-        if filtered_options_df.empty:
-            st.warning("선택한 매장·스타일코드에 해당하는 상품이 없습니다.")
-            return
-
-        selected_option_id = st.selectbox(
-            "개별 차트 확인할 상품",
-            options=filtered_options_df["option_id"].tolist(),
-            format_func=lambda oid: filtered_options_df.loc[
-                filtered_options_df["option_id"] == oid, "display_label"
-            ].iloc[0]
-        )
-
-    selected_row = filtered_options_df[filtered_options_df["option_id"] == selected_option_id].iloc[0]
-    selected_item_code = selected_row["item_code"]
-
-    selected_sku = str(selected_row["sku"]).strip()
-    selected_sku_name = str(selected_row["sku_name"]).strip()
-
-    final_item_df = final_prepared[
-        final_prepared["sku"].astype(str).str.strip() == selected_sku
-    ].copy()
-
-    if selected_plant != "전체":
-        final_item_df = final_item_df[
-            final_item_df["plant_name"].astype(str).str.strip() == selected_plant
-        ].copy()
-
-    lead_days, _minimum_capacity = get_reorder_policy(reorder_df, selected_sku)
-    reorder_top_message = st.empty()
+    if sku_store_combos.empty:
+        raise RuntimeError("RAW FILE에서 유효한 SKU·매장 조합이 없습니다.")
 
     this_year = int(pd.Timestamp.today().year)
-
-    item_name, weekly_df, monthly_df = prepare_plc_item_timeseries(plc_df, selected_item_code)
-    shape_label, shape_reason = classify_shape(item_name, monthly_df)
-    weekly_df = classify_weekly_stages_by_shape(weekly_df, shape_label)
-
-    compare_table_df = build_year_compare_table(
-        weekly_df=weekly_df,
-        final_item_df=final_item_df,
-        selected_sku=selected_sku,
-        selected_sku_name=selected_sku_name,
-        week_label_year=this_year,
-    )
-
-    try:
-        forecast_df = forecast_with_gpt(
-            item_name,
-            shape_label,
-            weekly_df,
-            final_item_df
-        )
-    except Exception as e:
-        forecast_df = pd.DataFrame(columns=["날짜", "forecast"])
-        st.error(f"GPT 예측 호출 실패: {e}")
-
-    # -----------------------------
-    # 주차별 작년 비중 / 올해 판매량 비교표
-    # - 미래 주차(현재 주차 이후)는 GPT 예측값으로 채우고 빨간색 표시
-    # - 주차(week_no)는 항상 오름차순 고정(ISO 주차 기준)
-    # -----------------------------
     current_week_no = int(pd.Timestamp.today().isocalendar().week)
+    extras_on = _persist_compare_extras_from_secrets()
 
-    title_col, btn_col = st.columns([4, 1])
-    with title_col:
-        st.markdown("### 주차별 작년 비중 / 올해 판매량 비교표")
-    with btn_col:
-        if st.button("이번주로 가기", use_container_width=True):
-            st.info(
-                f"이번 주는 **{format_calendar_week_label(this_year, current_week_no)}** 입니다. "
-                "표는 주차 오름차순이며, 해당 행은 노란색으로 표시됩니다."
-            )
+    all_rows: List[Dict[str, Any]] = []
+    all_run_rows: List[Dict[str, Any]] = []
+    skipped_notes: List[str] = []
+    success_combos = 0
 
-    (
-        compare_table_df,
-        predict_mask,
-        base_pred_mask,
-        is_future_week,
-    ) = apply_forecast_and_inventory_to_compare_table(
-        compare_table_df, forecast_df, this_year, current_week_no
-    )
-    sales_col = "올해 해당 주차 판매량 (장)"
+    for _, row_m in sku_store_combos.iterrows():
+        mat_sku = str(row_m["sku"]).strip()
+        mat_plant = str(row_m["plant_name"]).strip() or "전체"
+        mat_sku_name = str(row_m["sku_name"]).strip()
+        mat_item_code = str(row_m["item_code"]).strip()
+        mat_style_code = str(row_m["style_code"]).strip()
+        if not mat_sku:
+            skipped_notes.append(f"{mat_plant} / (빈 sku)")
+            continue
 
-    neg_loss = compare_table_df[
-        (compare_table_df["week_no"].astype(int) > current_week_no)
-        & (compare_table_df["로스"].astype(float) < 0)
-    ]
-    if neg_loss.empty:
-        reorder_top_message.info(
-            "표 기준 예측 기간 내에 로스가 0 미만인 주차가 없어, 리오더 발주 권장 시점을 표시할 수 없습니다."
+        disc_key_store = (mat_plant, mat_sku)
+        avg_disc_combo = discount_lookup.get(disc_key_store)
+        if avg_disc_combo is None:
+            avg_disc_combo = discount_lookup.get(("전체", mat_sku))
+
+        built = build_compare_table_for_final_option(
+            plc_df,
+            final_prepared,
+            selected_sku=mat_sku,
+            selected_sku_name=mat_sku_name,
+            selected_item_code=mat_item_code,
+            selected_plant=mat_plant,
+            this_year=this_year,
+            use_openai_shape=True,
+            apply_ratio_forecast=True,
         )
-    else:
-        loss_start_week = int(neg_loss.iloc[0]["week_no"])
-        weeks_lead = max(1, math.ceil(float(lead_days) / 7.0))
-        rec_week = loss_start_week - weeks_lead
-        if rec_week < 1 or iso_week_monday_month_day(this_year, rec_week) is None:
-            loss_lbl = format_calendar_week_label(this_year, loss_start_week)
-            reorder_top_message.warning(
-                f"로스 발생이 시작되는 주차는 {loss_lbl}이며, "
-                f"리오더 소요 {lead_days}일(약 {weeks_lead}주)을 반영한 권장 주차가 "
-                f"올해 ISO 주차 범위를 벗어납니다."
-            )
-        else:
-            rec_label = format_calendar_week_label(this_year, rec_week)
-            wm = compare_table_df["week_no"].astype(int)
-            qty = int(
-                compare_table_df.loc[
-                    (wm >= rec_week) & (wm < rec_week + weeks_lead),
-                    sales_col,
-                ].sum()
-            )
-            if qty < 1:
-                qty = max(1, abs(int(float(neg_loss.iloc[0]["로스"]))))
-            reorder_top_message.markdown(
-                f"**{rec_label}에는 {qty}장 리오더 발주 권장합니다.**"
-            )
-
-    plant_for_db = selected_plant if selected_plant != "전체" else "전체"
-    store_for_db = plant_for_db
-    disc_key = (str(plant_for_db).strip(), str(selected_sku).strip())
-    avg_discount_for_sync = discount_lookup.get(disc_key)
-
-    sb_client = get_supabase_client()
-    extras_on = False
-    try:
-        if hasattr(st, "secrets") and "supabase" in st.secrets:
-            sup_sec = st.secrets["supabase"]
-            extras_on = bool(sup_sec.get("persist_compare_table_extras", False))
-    except Exception:
-        extras_on = False
-
-    sync_cols = st.columns(2)
-    with sync_cols[0]:
-        web_run_supabase = st.button(
-            "실행 · 현재 표를 Supabase에 저장",
-            type="primary",
-            use_container_width=True,
-            key="web_run_supabase_sync",
-            help="구글 시트 center_stock·reorder 전체를 각 테이블에 덮어쓴 뒤, 선택 SKU·매장의 sku_weekly_forecast·sku_forecast_run을 저장합니다.",
+        if built is None:
+            skipped_notes.append(f"{mat_plant} / {mat_sku} (비교표 계산 실패)")
+            continue
+        ct, shape_lbl, peak_w, peak_m = built
+        if ct.empty:
+            skipped_notes.append(f"{mat_plant} / {mat_sku} (표 없음)")
+            continue
+        plant_for_db = mat_plant if mat_plant != "전체" else "전체"
+        store_for_db = mat_plant
+        rows_part = build_sku_weekly_forecast_rows(
+            ct,
+            mat_sku,
+            mat_sku_name,
+            mat_style_code,
+            plant=plant_for_db,
+            store_name=store_for_db,
+            avg_discount_rate=avg_disc_combo,
+            persist_compare_extras=extras_on,
+            current_week_no=current_week_no,
         )
-    with sync_cols[1]:
-        web_run_supabase_all = st.button(
-            "전체 시트 → Supabase 일괄 저장",
-            type="primary",
-            use_container_width=True,
-            key="web_run_supabase_sync_all",
-            help="center_stock·reorder 시트를 Supabase에 덮어쓴 뒤, RAW FILE의 MATERIAL(sku) 고유 목록별로 "
-            "sku_weekly_forecast·sku_forecast_run을 채웁니다. 매장은 전체 집계. 형태 분류는 로직만(OpenAI 없음).",
+        if not rows_part:
+            skipped_notes.append(f"{mat_plant} / {mat_sku} (저장할 행 없음)")
+            continue
+        all_rows.extend(rows_part)
+        all_run_rows.append(
+            build_sku_forecast_run_payload(
+                sku=mat_sku,
+                sku_name=mat_sku_name,
+                style_code=mat_style_code,
+                plant=plant_for_db,
+                store_name=store_for_db,
+                shape_type=shape_lbl,
+                peak_week=peak_w,
+                peak_month=peak_m,
+            )
         )
+        success_combos += 1
 
-    if web_run_supabase:
-        if _create_supabase_client is None:
-            st.session_state["supabase_sync_feedback"] = (
-                "error",
-                "Supabase 연동을 위해 `pip install supabase` 를 설치한 뒤 앱을 다시 실행하세요.",
-            )
-        elif sb_client is None:
-            st.session_state["supabase_sync_feedback"] = (
-                "error",
-                "Supabase 연결 정보가 없습니다. secrets.toml에 [supabase] url·service_role_key를 설정하세요.",
-            )
-        else:
+    clear_sku_weekly_forecast_table(sb_client)
+    bulk_insert_sku_weekly_forecast_rows(sb_client, all_rows)
+    clear_sku_forecast_run_table(sb_client)
+    bulk_insert_sku_forecast_run_rows(sb_client, all_run_rows)
+
+    return {
+        "weekly_row_count": len(all_rows),
+        "run_row_count": len(all_run_rows),
+        "combo_count": len(sku_store_combos),
+        "success_combos": success_combos,
+        "skipped": skipped_notes,
+    }
+
+
+def main() -> None:
+    """차트·비교표 없음. '데이터 넣기' 버튼으로 두 테이블만 갱신."""
+    st.set_page_config(page_title="Forecast DB 동기화", layout="centered")
+    if st.button("테이블에 데이터 넣기", type="primary"):
+        with st.spinner("RAW SKU×매장 조합 처리 중(OpenAI 형태 분류 포함)…"):
             try:
-                n_center = sync_center_stock_to_supabase(sb_client, replace_all=True)
-                n_reorder = sync_reorder_to_supabase(sb_client, replace_all=True)
-                rows = build_sku_weekly_forecast_rows(
-                    compare_table_df,
-                    selected_sku,
-                    selected_sku_name,
-                    str(selected_row["style_code"]).strip(),
-                    plant_for_db,
-                    store_for_db,
-                    avg_discount_rate=avg_discount_for_sync,
-                    persist_compare_extras=extras_on,
-                    current_week_no=current_week_no,
+                r = sync_forecast_tables_to_supabase()
+                print(
+                    f"[forecast_sync] weekly_rows={r['weekly_row_count']} "
+                    f"run_rows={r['run_row_count']} combos={r['combo_count']} "
+                    f"ok={r['success_combos']} skipped={len(r['skipped'])}"
                 )
-                sync_sku_weekly_forecast_to_supabase(sb_client, rows, selected_sku, plant_for_db)
-                pw, pm = peak_week_month_from_weekly_df(weekly_df)
-                run_payload = build_sku_forecast_run_payload(
-                    sku=selected_sku,
-                    sku_name=selected_sku_name,
-                    style_code=str(selected_row["style_code"]).strip(),
-                    plant=plant_for_db,
-                    store_name=store_for_db,
-                    shape_type=shape_label,
-                    peak_week=pw,
-                    peak_month=pm,
-                )
-                sync_sku_forecast_run_to_supabase(
-                    sb_client, run_payload, selected_sku, plant_for_db
-                )
-                st.session_state["supabase_sync_feedback"] = (
-                    "success",
-                    f"실행 완료: center_stock {n_center}행, reorder {n_reorder}행, "
-                    f"sku_weekly_forecast {len(rows)}행, sku_forecast_run 1건 "
-                    f"(sku={selected_sku}, plant={plant_for_db}, 형태={shape_label}).",
+                if r["skipped"]:
+                    print("[forecast_sync] skip_sample:", r["skipped"][:20])
+                st.success(
+                    f"완료: sku_weekly_forecast {r['weekly_row_count']:,}행, "
+                    f"sku_forecast_run {r['run_row_count']:,}건 "
+                    f"(성공 조합 {r['success_combos']}/{r['combo_count']}, 건너뜀 {len(r['skipped'])}). "
+                    "상세는 서버 로그(print)를 확인하세요."
                 )
             except Exception as e:
-                st.session_state["supabase_sync_feedback"] = ("error", f"실행 실패: {e}")
+                st.error(f"실패: {e}")
 
-    if web_run_supabase_all:
-        if _create_supabase_client is None:
-            st.session_state["supabase_sync_feedback"] = (
-                "error",
-                "Supabase 연동을 위해 `pip install supabase` 를 설치한 뒤 앱을 다시 실행하세요.",
-            )
-        elif sb_client is None:
-            st.session_state["supabase_sync_feedback"] = (
-                "error",
-                "Supabase 연결 정보가 없습니다. secrets.toml에 [supabase] url·service_role_key를 설정하세요.",
-            )
-        else:
-            try:
-                all_rows: List[Dict[str, Any]] = []
-                all_run_rows: List[Dict[str, Any]] = []
-                skipped_notes: List[str] = []
-                success_combos = 0
-                for _, row_m in all_material_options.iterrows():
-                    mat_sku = str(row_m["sku"]).strip()
-                    mat_sku_name = str(row_m["sku_name"]).strip()
-                    mat_item_code = str(row_m["item_code"]).strip()
-                    mat_style_code = str(row_m["style_code"]).strip()
-                    if not mat_sku:
-                        skipped_notes.append("(빈 MATERIAL/sku)")
-                        continue
-
-                    avg_disc_combo = discount_lookup.get(("전체", mat_sku))
-                    built = build_compare_table_for_final_option(
-                        plc_df,
-                        final_prepared,
-                        selected_sku=mat_sku,
-                        selected_sku_name=mat_sku_name,
-                        selected_item_code=mat_item_code,
-                        selected_plant="전체",
-                        this_year=this_year,
-                        use_openai_shape=False,
-                        apply_ratio_forecast=True,
-                    )
-                    if built is None:
-                        skipped_notes.append(f"{mat_sku} (비교표 계산 실패)")
-                        continue
-                    ct, shape_lbl, peak_w, peak_m = built
-                    if ct.empty:
-                        skipped_notes.append(f"{mat_sku} (표 없음)")
-                        continue
-                    rows_part = build_sku_weekly_forecast_rows(
-                        ct,
-                        mat_sku,
-                        mat_sku_name,
-                        mat_style_code,
-                        plant="전체",
-                        store_name="전체",
-                        avg_discount_rate=avg_disc_combo,
-                        persist_compare_extras=extras_on,
-                        current_week_no=current_week_no,
-                    )
-                    if not rows_part:
-                        skipped_notes.append(f"{mat_sku} (저장할 행 없음)")
-                        continue
-                    all_rows.extend(rows_part)
-                    all_run_rows.append(
-                        build_sku_forecast_run_payload(
-                            sku=mat_sku,
-                            sku_name=mat_sku_name,
-                            style_code=mat_style_code,
-                            plant="전체",
-                            store_name="전체",
-                            shape_type=shape_lbl,
-                            peak_week=peak_w,
-                            peak_month=peak_m,
-                        )
-                    )
-                    success_combos += 1
-
-                clear_sku_weekly_forecast_table(sb_client)
-                bulk_insert_sku_weekly_forecast_rows(sb_client, all_rows)
-                clear_sku_forecast_run_table(sb_client)
-                bulk_insert_sku_forecast_run_rows(sb_client, all_run_rows)
-                n_center = sync_center_stock_to_supabase(sb_client, replace_all=True)
-                n_reorder = sync_reorder_to_supabase(sb_client, replace_all=True)
-                st.session_state.pop("supabase_full_sync_skipped", None)
-                skip_tail = ""
-                if skipped_notes:
-                    preview = skipped_notes[:25]
-                    st.session_state["supabase_full_sync_skipped"] = preview + (
-                        [f"... 외 {len(skipped_notes) - 25}건"] if len(skipped_notes) > 25 else []
-                    )
-                    skip_tail = f" 건너뜀 {len(skipped_notes)}건."
-                st.session_state["supabase_sync_feedback"] = (
-                    "success",
-                    f"일괄 저장 완료: sku_weekly_forecast {len(all_rows)}행, "
-                    f"sku_forecast_run {len(all_run_rows)}건, center_stock {n_center}행, reorder {n_reorder}행, "
-                    f"조합 {success_combos}개 / RAW MATERIAL 고유 {len(all_material_options)}개.{skip_tail}",
-                )
-            except Exception as e:
-                st.session_state["supabase_sync_feedback"] = ("error", f"일괄 저장 실패: {e}")
-
-    fb = st.session_state.get("supabase_sync_feedback")
-    if fb:
-        kind, text = fb
-        if kind == "success":
-            st.success(text)
-        else:
-            st.error(text)
-
-    skipped_full = st.session_state.get("supabase_full_sync_skipped")
-    if skipped_full:
-        with st.expander("일괄 저장에서 건너뛴 MATERIAL (표 없음·계산 실패 등)"):
-            for line in skipped_full:
-                st.text(line)
-
-    with st.expander("Supabase 저장 안내 (4개 테이블)"):
-        st.markdown(
-            "**실행**·**전체 시트 일괄 저장** 모두 다음을 갱신합니다. "
-            "`center_stock`(시트 키 `[sheets].center_stock`, 기본 워크시트명 `center_stock`), "
-            "`reorder`(`[sheets].reorder`) — 위 두 시트는 **전체 삭제 후** 시트 내용 그대로 재적재합니다. "
-            "필수 컬럼: center_stock → `style_code`,`sku`,`center`,`stock_qty` / reorder → "
-            "`style_code`,`sku`,`factory`,`lead_time`,`minimum_capacity`. "
-            "**실행**은 화면에서 고른 SKU·매장만 저장합니다. **일괄 저장**은 RAW FILE의 MATERIAL(`sku`) 고유 목록 전체(매장은 전체 집계)에 대해 "
-            "`sku_weekly_forecast`·`sku_forecast_run`을 채웁니다. reorder 미매칭 시 lead_time=21일·minimum_capacity=600 기본값을 씁니다."
-        )
-        if _create_supabase_client is None:
-            st.warning("패키지: `pip install supabase`")
-        elif sb_client is None:
-            st.markdown(
-                "```toml\n[supabase]\nurl = \"https://xxxx.supabase.co\"\n"
-                "service_role_key = \"서비스롤키\"\n"
-                "# persist_compare_table_extras = true  # 확장 컬럼 사용 시\n```\n"
-                "RLS 사용 시 **service_role** 키 또는 insert 정책이 필요합니다."
-            )
-        else:
-            st.success("Supabase 연결이 설정되어 있습니다. 표 위 **실행** 버튼으로 저장하세요.")
-        st.caption(
-            "`sku_forecast_run` 저장 실패 시: **service_role_key** 권장(RLS 우회). RLS 유지 시 INSERT·DELETE·SELECT 정책 필요. "
-            "`id`는 identity/bigserial 권장. API 오류에 컬럼명이 나오면 secrets에 "
-            "`sku_forecast_sku_column = \"sku\"` 로 맞추세요. (기본 컬럼명은 `SKU`)"
-        )
-        st.caption(
-            "`sku_weekly_forecast.begin_stock`·`loss`·`outbound_qty`·`inbound_qty`는 저장 시마다 채우며, "
-            "각각 화면 비교표의 기초재고·로스·출고량(회전 등)·분배량과 같습니다."
-        )
-        if extras_on:
-            st.caption(
-                "확장 저장: `last_year_ratio_pct`, `beginning_inventory`, "
-                "`distribution_qty`, `shipment_qty` 컬럼이 테이블에 있어야 합니다."
-            )
-
-    display_df = compare_table_df[
-        [
-            "주차",
-            "작년의 해당 주차 판매비중(%)",
-            "기초재고",
-            "올해 해당 주차 판매량 (장)",
-            "분배량",
-            "출고량(회전 등)",
-            "로스",
-            "예측 단계",
-        ]
-    ].copy()
-
-    def _style_compare_table(_):
-        styles = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
-
-        # 현재 주차: 강조(노랑) — '주차' 표시 라벨과 ISO 주차 라벨이 일치하는 행
-        current_week_label = format_calendar_week_label(this_year, int(current_week_no))
-        mask_current = display_df["주차"].astype(str) == str(current_week_label)
-        styles.loc[mask_current, :] = "background-color: #FFF3BF; font-weight: 700;"
-
-        # 미래 주차 예측값: 빨강
-        styles.loc[predict_mask, "올해 해당 주차 판매량 (장)"] = "color: #C92A2A; font-weight: 800;"
-        styles.loc[base_pred_mask.values, "기초재고"] = "color: #C92A2A; font-weight: 800;"
-        styles.loc[is_future_week, "로스"] = "color: #C92A2A; font-weight: 800;"
-        styles.loc[is_future_week, "예측 단계"] = "color: #C92A2A; font-weight: 800;"
-        return styles
-
-    st.dataframe(
-        display_df.style.apply(_style_compare_table, axis=None),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "작년의 해당 주차 판매비중(%)": st.column_config.NumberColumn(
-                "작년의 해당 주차 판매비중(%)",
-                format="%.2f%%",
-            ),
-            "기초재고": st.column_config.NumberColumn(
-                "기초재고",
-                format="%d",
-            ),
-            "올해 해당 주차 판매량 (장)": st.column_config.NumberColumn(
-                "올해 해당 주차 판매량 (장)",
-                format="%d",
-            ),
-            "분배량": st.column_config.NumberColumn(
-                "분배량",
-                format="%d",
-            ),
-            "출고량(회전 등)": st.column_config.NumberColumn(
-                "출고량(회전 등)",
-                format="%d",
-            ),
-            "로스": st.column_config.NumberColumn(
-                "로스",
-                format="%d",
-            ),
-        }
-    )
-    st.markdown(
-        "<span style='color:#C92A2A; font-weight:800;'>빨간색 수치는 AI 예측값입니다.</span>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(f"### 아이템명: {item_name}")
-    st.markdown(f"### 형태: {shape_label}")
-    st.caption(shape_reason)
-
-    if shape_label == "단봉형":
-        st.markdown("**주차 단계 순서:** 도입 > 성장 > 피크 > 성숙 > 쇠퇴")
-    elif shape_label == "쌍봉형":
-        st.markdown("**주차 단계 순서:** 도입 > 성장 > 피크 > 성숙 > 비시즌 > 성숙 > 피크2 > 성숙 > 쇠퇴")
-    else:
-        st.markdown("**주차 단계 순서:** 도입 > 성장 > 성숙 > 쇠퇴")
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-
-        st.markdown("### 작년 매출")
-
-        fig1 = build_dual_line_chart(
-            item_name,
-            weekly_df,
-            monthly_df
-        )
-
-        st.plotly_chart(fig1, use_container_width=True)
-
-
-    with col2:
-        st.markdown("### 올해 매출 + AI 예측")
-    
-        fig2 = go.Figure()
-
-        this_year = int(pd.Timestamp.today().year)
-        year_start = pd.Timestamp(this_year, 1, 1)
-        year_end = pd.Timestamp(this_year, 12, 31)
-    
-        plot_final_df = final_item_df.dropna(subset=["날짜"]).copy()
-    
-        real_week = (
-            plot_final_df
-            .sort_values("날짜")
-            .groupby(pd.Grouper(key="날짜", freq="W"))["판매량"]
-            .sum()
-            .reset_index()
-        )
-    
-        real_week = real_week[real_week["판매량"] > 0].copy()
-        real_week = real_week[
-            (real_week["날짜"] >= year_start) & (real_week["날짜"] <= year_end)
-        ].copy()
-
-        forecast_plot_df = forecast_df.copy()
-        if not forecast_plot_df.empty:
-            forecast_plot_df = forecast_plot_df[
-                (forecast_plot_df["날짜"] >= year_start) & (forecast_plot_df["날짜"] <= year_end)
-            ].copy()
-    
-        if real_week.empty:
-            st.warning(
-                "올해 매출 데이터가 없습니다. Supabase final 원천 테이블의 날짜·판매량 컬럼(또는 CALDAY/SALE 스키마)과 "
-                "sku 매칭을 확인하세요."
-            )
-        else:
-            real_week = real_week.copy()
-            real_week["week_no"] = real_week["날짜"].dt.isocalendar().week.astype(int)
-            fig2.add_trace(
-                go.Scatter(
-                    x=real_week["날짜"],
-                    y=real_week["판매량"],
-                    customdata=real_week["week_no"],
-                    name="올해 매출",
-                    mode="lines+markers",
-                    hovertemplate=" %{customdata}주차<br>날짜: %{x|%Y-%m-%d}<br>판매량: %{y:,.0f}<extra></extra>",
-                )
-            )
-    
-        if not forecast_plot_df.empty:
-            forecast_plot_df = forecast_plot_df.copy()
-            forecast_plot_df["week_no"] = forecast_plot_df["날짜"].dt.isocalendar().week.astype(int)
-            fig2.add_trace(
-                go.Scatter(
-                    x=forecast_plot_df["날짜"],
-                    y=forecast_plot_df["forecast"],
-                    customdata=forecast_plot_df["week_no"],
-                    name="GPT 예측",
-                    mode="lines+markers",
-                    line=dict(dash="dash"),
-                    hovertemplate="주차: %{customdata}주차<br>날짜: %{x|%Y-%m-%d}<br>예측 판매량: %{y:,.0f}<extra></extra>",
-                )
-            )
-    
-        fig2.update_layout(
-            title=f"{item_name} 올해 매출 및 연말 예측",
-            xaxis_title="날짜",
-            yaxis_title="판매량",
-            height=650,
-            hovermode="x unified",
-            xaxis=dict(range=[year_start, year_end]),
-            yaxis=dict(rangemode="tozero")
-        )
-    
-        st.plotly_chart(fig2, use_container_width=True)
 
 if __name__ == "__main__":
     main()
