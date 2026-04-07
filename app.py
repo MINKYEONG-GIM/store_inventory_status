@@ -651,7 +651,7 @@ def build_sku_weekly_forecast_rows(
     compare_table_df: pd.DataFrame,
     sku: str,
     sku_name: str,
-    sty: str,
+    style_code: str,
     plant: str,
     store_name: str,
     avg_discount_rate: Optional[float] = None,
@@ -671,7 +671,7 @@ def build_sku_weekly_forecast_rows(
     - avg_discount_rate: final 시트 SALEAMT/SALEWHAN 기반 매장·SKU 할인율(동일 값을 모든 주차 행에 기록).
     """
     rows: List[Dict[str, Any]] = []
-    sty_s = str(sty).strip() if sty is not None else ""
+    style_s = str(style_code).strip() if style_code is not None else ""
     sku_s = str(sku).strip()
     plant_s = str(plant).strip() if plant else "전체"
     store_s = str(store_name).strip() if store_name else plant_s
@@ -701,7 +701,7 @@ def build_sku_weekly_forecast_rows(
             "sale_qty": as_supabase_int(qty),
             "is_forecast": is_forecast,
             "stage": stage,
-            "sty": sty_s,
+            "style_code": style_s,
             "sku": sku_s,
             "is_peak_week": peak,
             "plant": plant_s,
