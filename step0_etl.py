@@ -564,23 +564,35 @@ def fetch_supabase_table_all_rows(
     table_name: str,
     batch_size: int = 1000,
 ) -> List[Dict[str, Any]]:
-    """PostgREST 기본 행 제한을 피하기 위해 range로 전 행을 순회합니다."""
+    """
+    PostgREST 행 제한을 피해 limit/offset으로 전 행을 순회합니다.
+    (.range()는 클라이언트/버전에 따라 실패하는 경우가 있어 limit/offset을 우선 사용합니다.)
+    """
     rows: List[Dict[str, Any]] = []
-    offset = 0
+    off = 0
     while True:
-        resp = (
-            client.table(table_name)
-            .select("*")
-            .range(offset, offset + batch_size - 1)
-            .execute()
-        )
+        try:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .limit(batch_size)
+                .offset(off)
+                .execute()
+            )
+        except Exception:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .range(off, off + batch_size - 1)
+                .execute()
+            )
         chunk = resp.data if resp.data else []
         if not chunk:
             break
         rows.extend(chunk)
         if len(chunk) < batch_size:
             break
-        offset += batch_size
+        off += batch_size
     return rows
 
 
@@ -1182,19 +1194,12 @@ def load_final_df() -> pd.DataFrame:
     """
     client = get_supabase_client()
     if client is None:
-        raise ValueError(
+        raise RuntimeError(
             "final 데이터는 Supabase 테이블에서 읽습니다. "
-            "secrets.toml에 [supabase] url·service_role_key(또는 anon_key)를 설정하고, "
+            "secrets에 [supabase] url·service_role_key(또는 anon_key)를 설정하고, "
             "필요 시 raw_file_table 로 테이블명을 지정하세요(기본: raw_file)."
         )
-    tbl = get_raw_file_table_name()
-    try:
-        return load_raw_file_df_from_supabase(client)
-    except Exception as e:
-        raise ValueError(
-            f"Supabase 테이블 {tbl!r} 를 읽지 못했습니다. "
-            f"테이블명·RLS SELECT 권한·컬럼 구조를 확인하세요. 상세: {e}"
-        ) from e
+    return load_raw_file_df_from_supabase(client)
 
 
 @st.cache_data(ttl=300)
@@ -2189,7 +2194,19 @@ def main():
     st.set_page_config(page_title="아이템 매출 추이", layout="wide")
 
     plc_df = load_plc_df()
-    final_df = load_final_df()
+
+    try:
+        final_df = load_final_df()
+    except Exception as e:
+        tbl_hint = get_raw_file_table_name()
+        st.error(
+            f"Supabase에서 final 데이터 테이블 `{tbl_hint}` 를 불러오지 못했습니다.\n\n"
+            f"**오류 유형:** `{type(e).__name__}`  \n"
+            f"**메시지:** {e}\n\n"
+            "점검: Streamlit Secrets의 `[supabase] url`·`service_role_key`(또는 anon), "
+            f"선택 `raw_file_table`(기본 `raw_file`), 테이블 RLS의 **SELECT** 허용, 실제 테이블명(대소문자)."
+        )
+        st.stop()
 
     try:
         reorder_df = load_reorder_df()
