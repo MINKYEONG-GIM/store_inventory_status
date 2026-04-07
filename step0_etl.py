@@ -21,6 +21,9 @@ except ImportError:
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
+DEFAULT_REORDER_LEAD_TIME_DAYS = 21
+DEFAULT_REORDER_MINIMUM_CAPACITY = 600
+
 
 def get_gpt_gpi() -> Optional[str]:
     """
@@ -610,6 +613,7 @@ _RAW_FILE_ERP_COL_LOWERCASE = {
     "saleamt",
     "salewhan",
     "sstoc_tmp_amt",
+    "style_code",
 }
 _LEGACY_FINAL_COLS = {"sku", "sku_name", "plant_name"}
 
@@ -734,7 +738,7 @@ def build_sku_weekly_forecast_rows(
             "sale_qty": as_supabase_int(qty),
             "is_forecast": is_forecast,
             "stage": stage,
-            "sty": sty_s,
+            "style_code": sty_s,
             "sku": sku_s,
             "is_peak_week": peak,
             "plant": plant_s,
@@ -942,6 +946,32 @@ def read_center_stock_supabase_df() -> pd.DataFrame:
     return df
 
 
+def get_center_stock_qty(center_stock_df: pd.DataFrame, sku: str) -> int:
+    """
+    center_stock 시트(또는 동일 스키마 DataFrame)에서 SKU 재고 합계.
+    없으면 재고 0.
+    """
+    if center_stock_df is None or center_stock_df.empty:
+        return 0
+
+    sku_key = str(sku).strip()
+    if not sku_key:
+        return 0
+
+    df = center_stock_df.copy()
+    if "sku" not in df.columns or "stock_qty" not in df.columns:
+        return 0
+
+    df["sku"] = df["sku"].astype(str).str.strip()
+    matched = df[df["sku"] == sku_key].copy()
+
+    if matched.empty:
+        return 0
+
+    qty = pd.to_numeric(matched["stock_qty"], errors="coerce").fillna(0).sum()
+    return int(round(float(qty)))
+
+
 def read_reorder_supabase_df() -> pd.DataFrame:
     sheets_cfg = get_sheets_config()
     ws_name = str(sheets_cfg.get("reorder") or "reorder").strip()
@@ -1126,8 +1156,9 @@ def build_compare_table_for_final_option(
     apply_ratio_forecast: bool,
 ) -> Optional[Tuple[pd.DataFrame, str, Optional[int], Optional[int]]]:
     """
-    final 시트의 (매장, SKU) 한 조합에 대해 주차 비교표를 계산합니다.
-    plc db에 아이템코드가 없으면 None.
+    final의 SKU(=MATERIAL) 한 조합에 대해 주차 비교표를 계산합니다.
+    plc에 해당 아이템코드가 없으면 '평균' 행으로 시계열을 만듭니다(내부에서 처리).
+    그 외 오류 시 None.
     반환: (비교표, shape_type 라벨, peak_week ISO, peak_month 1~12)
     """
     sku_key = str(selected_sku).strip()
@@ -1210,40 +1241,60 @@ def load_reorder_df() -> pd.DataFrame:
     return load_sheet_as_df(reorder_sheet)
 
 
-def get_reorder_lead_time_days(reorder_df: pd.DataFrame, sku: str) -> Optional[int]:
+def get_reorder_policy(reorder_df: pd.DataFrame, sku: str) -> Tuple[int, int]:
     """
-    reorder 시트에서 선택 SKU에 해당하는 lead_time(일)을 반환합니다.
-    헤더가 sku가 중복이면 make_unique_headers로 sku, sku_2 등이 됩니다.
+    reorder 시트에서 SKU별 lead_time(일), minimum_capacity를 가져옵니다.
+    행이 없거나 컬럼이 없으면 기본값(21일, 600장).
     """
+    lead_time = DEFAULT_REORDER_LEAD_TIME_DAYS
+    minimum_capacity = DEFAULT_REORDER_MINIMUM_CAPACITY
+
     if reorder_df is None or reorder_df.empty:
-        return None
+        return lead_time, minimum_capacity
 
     sku_key = str(sku).strip()
     if not sku_key:
-        return None
-
-    lt_col = None
-    for c in reorder_df.columns:
-        if str(c).strip().lower() == "lead_time":
-            lt_col = c
-            break
-    if lt_col is None:
-        return None
+        return lead_time, minimum_capacity
 
     sku_cols = [c for c in reorder_df.columns if str(c).strip().lower().startswith("sku")]
     if not sku_cols:
-        return None
+        return lead_time, minimum_capacity
 
-    for col in sku_cols:
-        mask = reorder_df[col].astype(str).str.strip() == sku_key
+    lt_col = None
+    mc_col = None
+    for c in reorder_df.columns:
+        c_norm = str(c).strip().lower()
+        if c_norm == "lead_time":
+            lt_col = c
+        elif c_norm == "minimum_capacity":
+            mc_col = c
+
+    for sku_col in sku_cols:
+        mask = reorder_df[sku_col].astype(str).str.strip() == sku_key
         sub = reorder_df.loc[mask]
         if sub.empty:
             continue
-        for _, row in sub.iterrows():
+
+        row = sub.iloc[0]
+
+        if lt_col is not None:
             v = clean_number(row[lt_col])
             if pd.notna(v):
-                return int(round(float(v)))
-    return None
+                lead_time = int(round(float(v)))
+
+        if mc_col is not None:
+            v = clean_number(row[mc_col])
+            if pd.notna(v):
+                minimum_capacity = int(round(float(v)))
+
+        return lead_time, minimum_capacity
+
+    return lead_time, minimum_capacity
+
+
+def get_reorder_lead_time_days(reorder_df: pd.DataFrame, sku: str) -> int:
+    lead_time, _ = get_reorder_policy(reorder_df, sku)
+    return lead_time
 
 
 def iso_week_monday_month_day(year: int, week_no: int) -> Optional[Tuple[int, int]]:
@@ -1357,8 +1408,8 @@ def prepare_plc_item_timeseries(
     item_code: str
 ) -> Tuple[str, pd.DataFrame, pd.DataFrame]:
     """
-    plc db에서 item_code에 해당하는 행을 찾아
-    주차별/월별 시계열을 생성한다.
+    plc db에서 item_code에 해당하는 행을 찾고,
+    없으면 아이템코드가 '평균'인 행을 fallback으로 사용합니다.
     반환:
     - item_name
     - weekly_df
@@ -1372,13 +1423,26 @@ def prepare_plc_item_timeseries(
         raise ValueError(f"plc db 필수 컬럼이 없습니다: {missing}")
 
     df["아이템코드"] = df["아이템코드"].astype(str).str.strip()
-    matched = df[df["아이템코드"] == str(item_code).strip()].copy()
+    item_code_key = str(item_code).strip()
+
+    matched = df[df["아이템코드"] == item_code_key].copy()
+
+    fallback_used = False
+    if matched.empty:
+        matched = df[df["아이템코드"] == "평균"].copy()
+        fallback_used = True
 
     if matched.empty:
-        raise ValueError(f"plc db에서 아이템코드 '{item_code}'를 찾지 못했습니다.")
+        raise ValueError(
+            f"plc db에서 아이템코드 '{item_code_key}'도 없고, fallback용 '평균' 행도 없습니다."
+        )
 
     row = matched.iloc[0]
-    item_name = str(row["아이템명"]).strip()
+
+    if fallback_used:
+        item_name = f"{item_code_key} (평균기준)"
+    else:
+        item_name = str(row["아이템명"]).strip()
 
     week_cols = [c for c in df.columns if re.match(r"^\d{4}-\d{1,2}$", str(c).strip())]
     if not week_cols:
@@ -1399,7 +1463,7 @@ def prepare_plc_item_timeseries(
 
     weekly_df = pd.DataFrame(records).sort_values("week_start").reset_index(drop=True)
     if weekly_df.empty:
-        raise ValueError(f"아이템코드 '{item_code}'의 주차 데이터가 없습니다.")
+        raise ValueError(f"아이템코드 '{item_code_key}'의 주차 데이터가 없습니다.")
 
     weekly_df["month"] = weekly_df["week_start"].dt.to_period("M").dt.to_timestamp()
 
@@ -1971,7 +2035,15 @@ def prepare_final_df(final_df: pd.DataFrame) -> pd.DataFrame:
         # 실패 가능성을 낮추기 위해 비어 있으면 sku로 대체한다.
         df["item_code"] = df["sku"].apply(extract_item_code_from_sku)
         df.loc[df["item_code"].astype(str).str.strip() == "", "item_code"] = df["sku"]
-        df["style_code"] = df["sku"].map(style_code_from_material)
+        # RAW에 스타일 전용 열이 있으면 그대로 쓰고, 없을 때만 MATERIAL 앞 10자리 규칙 사용
+        style_src = next(
+            (c for c in ("STYLE_CODE", "style_code") if c in df.columns),
+            None,
+        )
+        if style_src is not None:
+            df["style_code"] = df[style_src].astype(str).str.strip()
+        else:
+            df["style_code"] = df["sku"].map(style_code_from_material)
 
         # 기존 코드가 기대하는 컬럼만 남기지는 않고, 원본 컬럼은 그대로 둔다(추후 확장 대비)
         return df
@@ -2025,7 +2097,14 @@ def prepare_final_df(final_df: pd.DataFrame) -> pd.DataFrame:
 
     df["날짜"] = pd.to_datetime(raw_date, errors="coerce")
 
-    df["style_code"] = df["sku"].map(style_code_from_material)
+    style_src = next(
+        (c for c in df.columns if str(c).strip().lower() == "style_code"),
+        None,
+    )
+    if style_src is not None:
+        df["style_code"] = df[style_src].astype(str).str.strip()
+    else:
+        df["style_code"] = df["sku"].map(style_code_from_material)
 
     return df
 
@@ -2226,6 +2305,31 @@ def main():
 
     final_prepared = prepare_final_df(final_df)
     discount_lookup = discount_rate_lookup_by_store_sku(final_prepared)
+
+    all_material_options = (
+        final_prepared[["plant_name", "sku_name", "item_code", "sku", "style_code"]]
+        .dropna(subset=["sku"])
+        .copy()
+    )
+    all_material_options["plant_name"] = (
+        all_material_options["plant_name"].fillna("").astype(str).str.strip().replace("", "전체")
+    )
+    all_material_options["sku"] = all_material_options["sku"].astype(str).str.strip()
+    all_material_options["sku_name"] = (
+        all_material_options["sku_name"].fillna("").astype(str).str.strip()
+    )
+    all_material_options["item_code"] = (
+        all_material_options["item_code"].fillna("").astype(str).str.strip()
+    )
+    all_material_options["style_code"] = (
+        all_material_options["style_code"].fillna("").astype(str).str.strip()
+    )
+    all_material_options = (
+        all_material_options[["sku", "sku_name", "item_code", "style_code"]]
+        .drop_duplicates(subset=["sku"])
+        .reset_index(drop=True)
+    )
+
     options_df = get_final_item_options(final_prepared)
 
     if options_df.empty:
@@ -2303,7 +2407,7 @@ def main():
             final_item_df["plant_name"].astype(str).str.strip() == selected_plant
         ].copy()
 
-    lead_days = get_reorder_lead_time_days(reorder_df, selected_sku)
+    lead_days, _minimum_capacity = get_reorder_policy(reorder_df, selected_sku)
     reorder_top_message = st.empty()
 
     this_year = int(pd.Timestamp.today().year)
@@ -2358,44 +2462,39 @@ def main():
     )
     sales_col = "올해 해당 주차 판매량 (장)"
 
-    if lead_days is None:
+    neg_loss = compare_table_df[
+        (compare_table_df["week_no"].astype(int) > current_week_no)
+        & (compare_table_df["로스"].astype(float) < 0)
+    ]
+    if neg_loss.empty:
         reorder_top_message.info(
-            "reorder 시트에서 해당 SKU의 리오더 소요일(lead_time)을 찾지 못했습니다."
+            "표 기준 예측 기간 내에 로스가 0 미만인 주차가 없어, 리오더 발주 권장 시점을 표시할 수 없습니다."
         )
     else:
-        neg_loss = compare_table_df[
-            (compare_table_df["week_no"].astype(int) > current_week_no)
-            & (compare_table_df["로스"].astype(float) < 0)
-        ]
-        if neg_loss.empty:
-            reorder_top_message.info(
-                "표 기준 예측 기간 내에 로스가 0 미만인 주차가 없어, 리오더 발주 권장 시점을 표시할 수 없습니다."
+        loss_start_week = int(neg_loss.iloc[0]["week_no"])
+        weeks_lead = max(1, math.ceil(float(lead_days) / 7.0))
+        rec_week = loss_start_week - weeks_lead
+        if rec_week < 1 or iso_week_monday_month_day(this_year, rec_week) is None:
+            loss_lbl = format_calendar_week_label(this_year, loss_start_week)
+            reorder_top_message.warning(
+                f"로스 발생이 시작되는 주차는 {loss_lbl}이며, "
+                f"리오더 소요 {lead_days}일(약 {weeks_lead}주)을 반영한 권장 주차가 "
+                f"올해 ISO 주차 범위를 벗어납니다."
             )
         else:
-            loss_start_week = int(neg_loss.iloc[0]["week_no"])
-            weeks_lead = max(1, math.ceil(float(lead_days) / 7.0))
-            rec_week = loss_start_week - weeks_lead
-            if rec_week < 1 or iso_week_monday_month_day(this_year, rec_week) is None:
-                loss_lbl = format_calendar_week_label(this_year, loss_start_week)
-                reorder_top_message.warning(
-                    f"로스 발생이 시작되는 주차는 {loss_lbl}이며, "
-                    f"리오더 소요 {lead_days}일(약 {weeks_lead}주)을 반영한 권장 주차가 "
-                    f"올해 ISO 주차 범위를 벗어납니다."
-                )
-            else:
-                rec_label = format_calendar_week_label(this_year, rec_week)
-                wm = compare_table_df["week_no"].astype(int)
-                qty = int(
-                    compare_table_df.loc[
-                        (wm >= rec_week) & (wm < rec_week + weeks_lead),
-                        sales_col,
-                    ].sum()
-                )
-                if qty < 1:
-                    qty = max(1, abs(int(float(neg_loss.iloc[0]["로스"]))))
-                reorder_top_message.markdown(
-                    f"**{rec_label}에는 {qty}장 리오더 발주 권장합니다.**"
-                )
+            rec_label = format_calendar_week_label(this_year, rec_week)
+            wm = compare_table_df["week_no"].astype(int)
+            qty = int(
+                compare_table_df.loc[
+                    (wm >= rec_week) & (wm < rec_week + weeks_lead),
+                    sales_col,
+                ].sum()
+            )
+            if qty < 1:
+                qty = max(1, abs(int(float(neg_loss.iloc[0]["로스"]))))
+            reorder_top_message.markdown(
+                f"**{rec_label}에는 {qty}장 리오더 발주 권장합니다.**"
+            )
 
     plant_for_db = selected_plant if selected_plant != "전체" else "전체"
     store_for_db = plant_for_db
@@ -2426,8 +2525,8 @@ def main():
             type="primary",
             use_container_width=True,
             key="web_run_supabase_sync_all",
-            help="center_stock·reorder 시트를 Supabase에 덮어쓴 뒤, final 전 조합의 sku_weekly_forecast·sku_forecast_run을 채웁니다. "
-            "형태 분류는 로직만(OpenAI 없음).",
+            help="center_stock·reorder 시트를 Supabase에 덮어쓴 뒤, RAW FILE의 MATERIAL(sku) 고유 목록별로 "
+            "sku_weekly_forecast·sku_forecast_run을 채웁니다. 매장은 전체 집계. 형태 분류는 로직만(OpenAI 없음).",
         )
 
     if web_run_supabase:
@@ -2497,54 +2596,56 @@ def main():
                 all_run_rows: List[Dict[str, Any]] = []
                 skipped_notes: List[str] = []
                 success_combos = 0
-                for _, opt in options_df.iterrows():
-                    plant_db = str(opt.get("plant_name", "")).strip() or "전체"
-                    sku_v = str(opt.get("sku", "")).strip()
-                    if not sku_v:
-                        skipped_notes.append(f"(빈 SKU) / {plant_db}")
+                for _, row_m in all_material_options.iterrows():
+                    mat_sku = str(row_m["sku"]).strip()
+                    mat_sku_name = str(row_m["sku_name"]).strip()
+                    mat_item_code = str(row_m["item_code"]).strip()
+                    mat_style_code = str(row_m["style_code"]).strip()
+                    if not mat_sku:
+                        skipped_notes.append("(빈 MATERIAL/sku)")
                         continue
-                    pf = plant_db if plant_db != "전체" else "전체"
-                    avg_disc_combo = discount_lookup.get((str(pf).strip(), str(sku_v).strip()))
+
+                    avg_disc_combo = discount_lookup.get(("전체", mat_sku))
                     built = build_compare_table_for_final_option(
                         plc_df,
                         final_prepared,
-                        selected_sku=sku_v,
-                        selected_sku_name=str(opt.get("sku_name", "")).strip(),
-                        selected_item_code=str(opt.get("item_code", "")).strip(),
-                        selected_plant=plant_db,
+                        selected_sku=mat_sku,
+                        selected_sku_name=mat_sku_name,
+                        selected_item_code=mat_item_code,
+                        selected_plant="전체",
                         this_year=this_year,
                         use_openai_shape=False,
                         apply_ratio_forecast=True,
                     )
                     if built is None:
-                        skipped_notes.append(f"{sku_v} / {plant_db} (plc db 매칭 실패 또는 표 없음)")
+                        skipped_notes.append(f"{mat_sku} (비교표 계산 실패)")
                         continue
                     ct, shape_lbl, peak_w, peak_m = built
                     if ct.empty:
-                        skipped_notes.append(f"{sku_v} / {plant_db} (표 없음)")
+                        skipped_notes.append(f"{mat_sku} (표 없음)")
                         continue
                     rows_part = build_sku_weekly_forecast_rows(
                         ct,
-                        sku_v,
-                        str(opt.get("sku_name", "")).strip(),
-                        str(opt.get("style_code", "")).strip(),
-                        pf,
-                        plant_db if plant_db != "전체" else pf,
+                        mat_sku,
+                        mat_sku_name,
+                        mat_style_code,
+                        plant="전체",
+                        store_name="전체",
                         avg_discount_rate=avg_disc_combo,
                         persist_compare_extras=extras_on,
                         current_week_no=current_week_no,
                     )
                     if not rows_part:
-                        skipped_notes.append(f"{sku_v} / {plant_db} (저장할 행 없음)")
+                        skipped_notes.append(f"{mat_sku} (저장할 행 없음)")
                         continue
                     all_rows.extend(rows_part)
                     all_run_rows.append(
                         build_sku_forecast_run_payload(
-                            sku=sku_v,
-                            sku_name=str(opt.get("sku_name", "")).strip(),
-                            style_code=str(opt.get("style_code", "")).strip(),
-                            plant=pf,
-                            store_name=plant_db if plant_db != "전체" else pf,
+                            sku=mat_sku,
+                            sku_name=mat_sku_name,
+                            style_code=mat_style_code,
+                            plant="전체",
+                            store_name="전체",
                             shape_type=shape_lbl,
                             peak_week=peak_w,
                             peak_month=peak_m,
@@ -2565,12 +2666,12 @@ def main():
                     st.session_state["supabase_full_sync_skipped"] = preview + (
                         [f"... 외 {len(skipped_notes) - 25}건"] if len(skipped_notes) > 25 else []
                     )
-                    skip_tail = f" 건너뜀 {len(skipped_notes)}건(plc 미매칭 등)."
+                    skip_tail = f" 건너뜀 {len(skipped_notes)}건."
                 st.session_state["supabase_sync_feedback"] = (
                     "success",
                     f"일괄 저장 완료: sku_weekly_forecast {len(all_rows)}행, "
                     f"sku_forecast_run {len(all_run_rows)}건, center_stock {n_center}행, reorder {n_reorder}행, "
-                    f"조합 {success_combos}개 / 시트 후보 {len(options_df)}개.{skip_tail}",
+                    f"조합 {success_combos}개 / RAW MATERIAL 고유 {len(all_material_options)}개.{skip_tail}",
                 )
             except Exception as e:
                 st.session_state["supabase_sync_feedback"] = ("error", f"일괄 저장 실패: {e}")
@@ -2585,7 +2686,7 @@ def main():
 
     skipped_full = st.session_state.get("supabase_full_sync_skipped")
     if skipped_full:
-        with st.expander("일괄 저장에서 건너뛴 조합 (plc db에 아이템코드 없음 등)"):
+        with st.expander("일괄 저장에서 건너뛴 MATERIAL (표 없음·계산 실패 등)"):
             for line in skipped_full:
                 st.text(line)
 
@@ -2596,7 +2697,8 @@ def main():
             "`reorder`(`[sheets].reorder`) — 위 두 시트는 **전체 삭제 후** 시트 내용 그대로 재적재합니다. "
             "필수 컬럼: center_stock → `style_code`,`sku`,`center`,`stock_qty` / reorder → "
             "`style_code`,`sku`,`factory`,`lead_time`,`minimum_capacity`. "
-            "추가로 선택(또는 final 전 조합)에 대해 `sku_weekly_forecast`·`sku_forecast_run`을 저장합니다."
+            "**실행**은 화면에서 고른 SKU·매장만 저장합니다. **일괄 저장**은 RAW FILE의 MATERIAL(`sku`) 고유 목록 전체(매장은 전체 집계)에 대해 "
+            "`sku_weekly_forecast`·`sku_forecast_run`을 채웁니다. reorder 미매칭 시 lead_time=21일·minimum_capacity=600 기본값을 씁니다."
         )
         if _create_supabase_client is None:
             st.warning("패키지: `pip install supabase`")
