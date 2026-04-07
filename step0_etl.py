@@ -543,6 +543,89 @@ def get_supabase_client():
     return _create_supabase_client(url, key)
 
 
+def get_raw_file_table_name() -> str:
+    """
+    final 데이터 원천 Supabase 테이블명.
+    secrets.toml [supabase] raw_file_table (기본: raw_file)
+    환경변수 SUPABASE_RAW_FILE_TABLE
+    """
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            v = st.secrets["supabase"].get("raw_file_table")
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    except Exception:
+        pass
+    return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "raw_file").strip()
+
+
+def fetch_supabase_table_all_rows(
+    client,
+    table_name: str,
+    batch_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    """PostgREST 기본 행 제한을 피하기 위해 range로 전 행을 순회합니다."""
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        resp = (
+            client.table(table_name)
+            .select("*")
+            .range(offset, offset + batch_size - 1)
+            .execute()
+        )
+        chunk = resp.data if resp.data else []
+        if not chunk:
+            break
+        rows.extend(chunk)
+        if len(chunk) < batch_size:
+            break
+        offset += batch_size
+    return rows
+
+
+# prepare_final_df 신스키마(CALDAY, PLANT, …)는 대문자 컬럼명을 기대합니다.
+_RAW_FILE_ERP_COL_LOWERCASE = {
+    "calday",
+    "plant",
+    "material",
+    "sale",
+    "sstoc_tmp_qty",
+    "hstoc_qty",
+    "ipgo_qty",
+    "ordqty",
+    "saleamt",
+    "salewhan",
+    "sstoc_tmp_amt",
+}
+_LEGACY_FINAL_COLS = {"sku", "sku_name", "plant_name"}
+
+
+def normalize_raw_file_columns_for_prepare_final(df: pd.DataFrame) -> pd.DataFrame:
+    """Supabase/Postgres snake_case·대소문자와 기존 final 시트 스키마를 맞춥니다."""
+    if df.empty:
+        return df
+    rename: Dict[str, str] = {}
+    for c in df.columns:
+        key = str(c).strip()
+        kl = key.lower()
+        if kl in _RAW_FILE_ERP_COL_LOWERCASE:
+            rename[c] = kl.upper()
+        elif kl in _LEGACY_FINAL_COLS:
+            rename[c] = kl
+    return df.rename(columns=rename) if rename else df
+
+
+def load_raw_file_df_from_supabase(client) -> pd.DataFrame:
+    """[supabase] raw_file_table 전체를 DataFrame으로 로드합니다."""
+    tbl = get_raw_file_table_name()
+    records = fetch_supabase_table_all_rows(client, tbl)
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
+    return normalize_raw_file_columns_for_prepare_final(df)
+
+
 def get_sku_forecast_run_sku_column_name() -> str:
     """
     sku_forecast_run 테이블의 SKU 컬럼 PostgREST 이름.
@@ -1094,9 +1177,24 @@ def load_plc_df() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_final_df() -> pd.DataFrame:
-    sheets_cfg = get_sheets_config()
-    final_sheet = sheets_cfg.get("final") or "final"
-    return load_sheet_as_df(final_sheet)
+    """
+    올해 실적 등 final 계열 데이터는 Supabase `raw_file` 테이블(이름은 [supabase].raw_file_table)에서 읽습니다.
+    """
+    client = get_supabase_client()
+    if client is None:
+        raise ValueError(
+            "final 데이터는 Supabase 테이블에서 읽습니다. "
+            "secrets.toml에 [supabase] url·service_role_key(또는 anon_key)를 설정하고, "
+            "필요 시 raw_file_table 로 테이블명을 지정하세요(기본: raw_file)."
+        )
+    tbl = get_raw_file_table_name()
+    try:
+        return load_raw_file_df_from_supabase(client)
+    except Exception as e:
+        raise ValueError(
+            f"Supabase 테이블 {tbl!r} 를 읽지 못했습니다. "
+            f"테이블명·RLS SELECT 권한·컬럼 구조를 확인하세요. 상세: {e}"
+        ) from e
 
 
 @st.cache_data(ttl=300)
@@ -2628,7 +2726,10 @@ def main():
             ].copy()
     
         if real_week.empty:
-            st.warning("올해 매출 데이터가 없습니다. final 시트의 날짜 형식 또는 sku 매칭을 확인하세요.")
+            st.warning(
+                "올해 매출 데이터가 없습니다. Supabase raw_file 테이블의 날짜·판매량 컬럼(또는 CALDAY/SALE 스키마)과 "
+                "sku 매칭을 확인하세요."
+            )
         else:
             real_week = real_week.copy()
             real_week["week_no"] = real_week["날짜"].dt.isocalendar().week.astype(int)
