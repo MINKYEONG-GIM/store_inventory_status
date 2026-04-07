@@ -645,6 +645,84 @@ def fetch_supabase_table_all_rows(
     return rows
 
 
+def _iter_calday_windows(
+    start_calday: int,
+    end_calday: int,
+    window_days: int = 31,
+) -> List[Tuple[int, int]]:
+    """
+    CALDAY(YYYYMMDD) 범위를 window_days 단위로 쪼갠 (start, end) 리스트.
+    Supabase/Postgres statement timeout을 피하기 위해 RAW FILE을 구간 조회할 때 사용합니다.
+    """
+    try:
+        start_ts = pd.to_datetime(str(int(start_calday)), format="%Y%m%d", errors="coerce")
+        end_ts = pd.to_datetime(str(int(end_calday)), format="%Y%m%d", errors="coerce")
+    except Exception:
+        start_ts, end_ts = pd.NaT, pd.NaT
+
+    if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+        return [(int(start_calday), int(end_calday))]
+
+    out: List[Tuple[int, int]] = []
+    cur = pd.Timestamp(start_ts.date())
+    end = pd.Timestamp(end_ts.date())
+    delta = pd.Timedelta(days=int(window_days))
+
+    while cur <= end:
+        win_end = min(end, cur + delta)
+        s = int(cur.strftime("%Y%m%d"))
+        e = int(win_end.strftime("%Y%m%d"))
+        out.append((s, e))
+        cur = win_end + pd.Timedelta(days=1)
+
+    return out
+
+
+def fetch_raw_file_rows_by_calday_windows(
+    client,
+    table_name: str,
+    *,
+    select: str,
+    start_calday: int,
+    end_calday: int,
+    window_days: int = 31,
+    batch_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    """
+    RAW FILE처럼 큰 테이블을 CALDAY 구간으로 나눠 조회합니다.
+    - 각 구간: gte/lte + order("CALDAY")
+    - 구간 내 pagination은 limit/offset으로 처리(구간이 작아 offset 비용을 제한)
+    """
+    rows: List[Dict[str, Any]] = []
+    windows = _iter_calday_windows(int(start_calday), int(end_calday), window_days=window_days)
+
+    for (s_day, e_day) in windows:
+        off = 0
+        while True:
+            q = (
+                client.table(table_name)
+                .select(select)
+                .gte("CALDAY", int(s_day))
+                .lte("CALDAY", int(e_day))
+                .order("CALDAY")
+            )
+            try:
+                resp = q.limit(batch_size).offset(off).execute()
+            except Exception:
+                # 일부 클라이언트/환경에서는 range가 더 안정적일 수 있음
+                resp = q.range(off, off + batch_size - 1).execute()
+
+            chunk = resp.data if resp.data else []
+            if not chunk:
+                break
+            rows.extend(chunk)
+            if len(chunk) < batch_size:
+                break
+            off += batch_size
+
+    return rows
+
+
 # prepare_final_df 신스키마(CALDAY, PLANT, …)는 대문자 컬럼명을 기대합니다.
 _RAW_FILE_ERP_COL_LOWERCASE = {
     "calday",
@@ -682,12 +760,17 @@ def load_raw_file_df_from_supabase(client) -> pd.DataFrame:
     """[supabase] raw_file_table을 필요한 컬럼·기간만 조회해 DataFrame으로 로드합니다."""
     tbl = get_raw_file_table_name()
     min_day = get_raw_file_min_calday_int()
-    records = fetch_supabase_table_all_rows(
+    today_day = int(pd.Timestamp.today().strftime("%Y%m%d"))
+    # RAW FILE은 행 수가 커서 한 번에 offset pagination을 돌리면 statement timeout이 자주 납니다.
+    # CALDAY 구간으로 쪼개서 조회합니다.
+    records = fetch_raw_file_rows_by_calday_windows(
         client,
         tbl,
         select=RAW_FILE_SUPABASE_SELECT,
-        gte_filter=("CALDAY", min_day),
-        order_by="CALDAY",
+        start_calday=min_day,
+        end_calday=today_day,
+        window_days=31,
+        batch_size=1000,
     )
     if not records:
         return pd.DataFrame()
