@@ -16,6 +16,8 @@ try:
 except ImportError:
     _create_supabase_client = None
 
+# OpenAI 월별 형태 분류 결과 캐시(동일 시계열 재호출 방지). 프로세스 단위.
+_SHAPE_OPENAI_CACHE: Dict[str, Tuple[str, str]] = {}
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -160,7 +162,7 @@ def discount_rate_lookup_by_store_sku(prepared_final_df: pd.DataFrame) -> Dict[T
         plant_k = str(row["plant_name"]).strip() or "전체"
         out[(plant_k, sku_k)] = 1.0 - (float(sa) / float(sw))
 
-    agg_all = tmp.groupby("sku", as_index=False)[["_saleamt", "_salewhan"]].sum()
+    agg_all = agg_store.groupby("sku", as_index=False)[["_saleamt", "_salewhan"]].sum()
     for _, row in agg_all.iterrows():
         sw, sa = row["_salewhan"], row["_saleamt"]
         if pd.isna(sw) or float(sw) == 0.0:
@@ -403,6 +405,19 @@ def classify_shape(
 
         return "단봉형", "로직 미확정으로 단봉형 fallback"
 
+    cache_key = json.dumps(
+        {
+            "n": item_name.strip(),
+            "m": month_labels,
+            "y": [round(float(v), 6) for v in y],
+            "s": [round(float(v), 4) for v in y_smooth],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if cache_key in _SHAPE_OPENAI_CACHE:
+        return _SHAPE_OPENAI_CACHE[cache_key]
+
     prompt = f"""
 
     
@@ -448,8 +463,10 @@ def classify_shape(
     # 1차 판단: GPT
     try:
         result = call_openai_chat_json(messages)
-        return result["shape_label"], f"GPT 1차 판별: {result['reason']}"
-    except Exception as e:
+        out = (result["shape_label"], f"GPT 1차 판별: {result['reason']}")
+        _SHAPE_OPENAI_CACHE[cache_key] = out
+        return out
+    except Exception:
         pass
 
     # 2차 fallback: 로직
@@ -561,33 +578,63 @@ def get_raw_file_table_name() -> str:
     return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "RAW FILE").strip()
 
 
+# RAW FILE 조회 시 필요한 컬럼만 (select("*") 금지)
+RAW_FILE_SUPABASE_SELECT = (
+    "CALDAY,PLANT,MATERIAL,SALE,SSTOC_TMP_QTY,HSTOC_QTY,IPGO_QTY,ORDQTY,"
+    "STYLE_CODE,SALEAMT,SALEWHAN"
+)
+
+
+def get_raw_file_min_calday_int() -> int:
+    """
+    CALDAY(YYYYMMDD) 하한. secrets [supabase] raw_file_min_calday 또는
+    환경변수 SUPABASE_RAW_FILE_MIN_CALDAY (기본 20250101).
+    """
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            v = st.secrets["supabase"].get("raw_file_min_calday")
+            if v is not None and str(v).strip():
+                return int(str(v).strip().replace(".0", ""))
+    except Exception:
+        pass
+    env_v = (os.getenv("SUPABASE_RAW_FILE_MIN_CALDAY") or "").strip()
+    if env_v:
+        return int(env_v.replace(".0", ""))
+    return 20250101
+
+
 def fetch_supabase_table_all_rows(
     client,
     table_name: str,
     batch_size: int = 1000,
+    select: str = "*",
+    gte_filter: Optional[Tuple[str, Any]] = None,
+    order_by: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     PostgREST 행 제한을 피해 limit/offset으로 전 행을 순회합니다.
     (.range()는 클라이언트/버전에 따라 실패하는 경우가 있어 limit/offset을 우선 사용합니다.)
+    offset 안정화를 위해 order_by를 함께 쓰는 것을 권장합니다.
     """
     rows: List[Dict[str, Any]] = []
     off = 0
+
+    def _build_query(for_range: bool):
+        q = client.table(table_name).select(select)
+        if gte_filter is not None:
+            col_g, val_g = gte_filter
+            q = q.gte(col_g, val_g)
+        if order_by:
+            q = q.order(order_by)
+        if for_range:
+            return q.range(off, off + batch_size - 1)
+        return q.limit(batch_size).offset(off)
+
     while True:
         try:
-            resp = (
-                client.table(table_name)
-                .select("*")
-                .limit(batch_size)
-                .offset(off)
-                .execute()
-            )
+            resp = _build_query(for_range=False).execute()
         except Exception:
-            resp = (
-                client.table(table_name)
-                .select("*")
-                .range(off, off + batch_size - 1)
-                .execute()
-            )
+            resp = _build_query(for_range=True).execute()
         chunk = resp.data if resp.data else []
         if not chunk:
             break
@@ -632,9 +679,16 @@ def normalize_raw_file_columns_for_prepare_final(df: pd.DataFrame) -> pd.DataFra
 
 
 def load_raw_file_df_from_supabase(client) -> pd.DataFrame:
-    """[supabase] raw_file_table 전체를 DataFrame으로 로드합니다."""
+    """[supabase] raw_file_table을 필요한 컬럼·기간만 조회해 DataFrame으로 로드합니다."""
     tbl = get_raw_file_table_name()
-    records = fetch_supabase_table_all_rows(client, tbl)
+    min_day = get_raw_file_min_calday_int()
+    records = fetch_supabase_table_all_rows(
+        client,
+        tbl,
+        select=RAW_FILE_SUPABASE_SELECT,
+        gte_filter=("CALDAY", min_day),
+        order_by="CALDAY",
+    )
     if not records:
         return pd.DataFrame()
     df = pd.DataFrame(records)
@@ -1143,7 +1197,7 @@ def apply_forecast_and_inventory_to_compare_table(
 
 def build_compare_table_for_final_option(
     plc_df: pd.DataFrame,
-    final_prepared: pd.DataFrame,
+    grouped_final: Dict[Tuple[str, str], pd.DataFrame],
     *,
     selected_sku: str,
     selected_sku_name: str,
@@ -1162,11 +1216,10 @@ def build_compare_table_for_final_option(
     sku_key = str(selected_sku).strip()
     plant_key = str(selected_plant).strip() if selected_plant else "전체"
 
-    final_item_df = final_prepared[final_prepared["sku"].astype(str).str.strip() == sku_key].copy()
-    if plant_key and plant_key != "전체":
-        final_item_df = final_item_df[
-            final_item_df["plant_name"].astype(str).str.strip() == plant_key
-        ].copy()
+    final_item_df = grouped_final.get((plant_key, sku_key))
+    if final_item_df is None or final_item_df.empty:
+        return None
+    final_item_df = final_item_df.copy()
 
     try:
         item_name, weekly_df, monthly_df = prepare_plc_item_timeseries(
@@ -2114,27 +2167,27 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     final_prepared = prepare_final_df(final_df)
     discount_lookup = discount_rate_lookup_by_store_sku(final_prepared)
 
+    # SKU×매장 조합별로 final을 미리 쪼개서(한 번만) 이후 루프에서 전체 DataFrame 재필터링을 피합니다.
+    final_prepared["sku"] = final_prepared["sku"].astype(str).str.strip()
+    final_prepared["plant_name"] = (
+        final_prepared["plant_name"].astype(str).str.strip().replace("", "전체")
+    )
+    grouped_final: Dict[Tuple[str, str], pd.DataFrame] = {
+        key: grp.copy()
+        for key, grp in final_prepared.groupby(["plant_name", "sku"], sort=False)
+    }
+
+    _combo_cols = ["plant_name", "sku_name", "item_code", "sku", "style_code"]
+    _fp_combo = final_prepared[_combo_cols].dropna(subset=["sku"]).copy()
+    _fp_combo["plant_name"] = (
+        _fp_combo["plant_name"].fillna("").astype(str).str.strip().replace("", "전체")
+    )
+    _fp_combo["sku"] = _fp_combo["sku"].astype(str).str.strip()
+    _fp_combo["sku_name"] = _fp_combo["sku_name"].fillna("").astype(str).str.strip()
+    _fp_combo["item_code"] = _fp_combo["item_code"].fillna("").astype(str).str.strip()
+    _fp_combo["style_code"] = _fp_combo["style_code"].fillna("").astype(str).str.strip()
     sku_store_combos = (
-        final_prepared[["plant_name", "sku_name", "item_code", "sku", "style_code"]]
-        .dropna(subset=["sku"])
-        .copy()
-    )
-    sku_store_combos["plant_name"] = (
-        sku_store_combos["plant_name"].fillna("").astype(str).str.strip().replace("", "전체")
-    )
-    sku_store_combos["sku"] = sku_store_combos["sku"].astype(str).str.strip()
-    sku_store_combos["sku_name"] = (
-        sku_store_combos["sku_name"].fillna("").astype(str).str.strip()
-    )
-    sku_store_combos["item_code"] = (
-        sku_store_combos["item_code"].fillna("").astype(str).str.strip()
-    )
-    sku_store_combos["style_code"] = (
-        sku_store_combos["style_code"].fillna("").astype(str).str.strip()
-    )
-    sku_store_combos = (
-        sku_store_combos.drop_duplicates(subset=["plant_name", "sku"])
-        .reset_index(drop=True)
+        _fp_combo.groupby(["plant_name", "sku"], sort=False, as_index=False).first()
     )
 
     if sku_store_combos.empty:
@@ -2144,8 +2197,30 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     current_week_no = int(pd.Timestamp.today().isocalendar().week)
     extras_on = _persist_compare_extras_from_secrets()
 
-    all_rows: List[Dict[str, Any]] = []
-    all_run_rows: List[Dict[str, Any]] = []
+    clear_sku_weekly_forecast_table(sb_client)
+    clear_sku_forecast_run_table(sb_client)
+
+    weekly_row_total = 0
+    weekly_buffer: List[Dict[str, Any]] = []
+    run_buffer: List[Dict[str, Any]] = []
+    weekly_flush_at = 3000
+    run_flush_at = 500
+
+    def _flush_weekly_partial() -> None:
+        nonlocal weekly_buffer, weekly_row_total
+        if not weekly_buffer:
+            return
+        bulk_insert_sku_weekly_forecast_rows(sb_client, weekly_buffer)
+        weekly_row_total += len(weekly_buffer)
+        weekly_buffer = []
+
+    def _flush_run_partial() -> None:
+        nonlocal run_buffer
+        if not run_buffer:
+            return
+        bulk_insert_sku_forecast_run_rows(sb_client, run_buffer)
+        run_buffer = []
+
     skipped_notes: List[str] = []
     success_combos = 0
 
@@ -2166,7 +2241,7 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
 
         built = build_compare_table_for_final_option(
             plc_df,
-            final_prepared,
+            grouped_final,
             selected_sku=mat_sku,
             selected_sku_name=mat_sku_name,
             selected_item_code=mat_item_code,
@@ -2198,8 +2273,10 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         if not rows_part:
             skipped_notes.append(f"{mat_plant} / {mat_sku} (저장할 행 없음)")
             continue
-        all_rows.extend(rows_part)
-        all_run_rows.append(
+        weekly_buffer.extend(rows_part)
+        if len(weekly_buffer) >= weekly_flush_at:
+            _flush_weekly_partial()
+        run_buffer.append(
             build_sku_forecast_run_payload(
                 sku=mat_sku,
                 sku_name=mat_sku_name,
@@ -2211,16 +2288,16 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
                 peak_month=peak_m,
             )
         )
+        if len(run_buffer) >= run_flush_at:
+            _flush_run_partial()
         success_combos += 1
 
-    clear_sku_weekly_forecast_table(sb_client)
-    bulk_insert_sku_weekly_forecast_rows(sb_client, all_rows)
-    clear_sku_forecast_run_table(sb_client)
-    bulk_insert_sku_forecast_run_rows(sb_client, all_run_rows)
+    _flush_weekly_partial()
+    _flush_run_partial()
 
     return {
-        "weekly_row_count": len(all_rows),
-        "run_row_count": len(all_run_rows),
+        "weekly_row_count": weekly_row_total,
+        "run_row_count": success_combos,
         "combo_count": len(sku_store_combos),
         "success_combos": success_combos,
         "skipped": skipped_notes,
