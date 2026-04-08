@@ -408,8 +408,7 @@ def get_raw_file_table_name() -> str:
 
 # RAW FILE 조회 시 필요한 컬럼만 (select("*") 금지)
 RAW_FILE_SUPABASE_SELECT = (
-    "CALDAY,PLANT,sku,style_code,STOCK_CHANGE_QTY,SALE_QTY,IPGO_QTY,BASE_STOCK_QTY,"
-    "SALEAMT,SALEWHAN"
+    "CALDAY,PLANT,sku,style_code,STOCK_CHANGE_QTY,SALE_QTY,IPGO_QTY,BASE_STOCK_QTY"
 )
 
 
