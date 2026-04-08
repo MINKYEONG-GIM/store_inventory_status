@@ -408,8 +408,8 @@ def get_raw_file_table_name() -> str:
 
 # RAW FILE 조회 시 필요한 컬럼만 (select("*") 금지)
 RAW_FILE_SUPABASE_SELECT = (
-    "CALDAY,PLANT,MATERIAL,SALE,SSTOC_TMP_QTY,HSTOC_QTY,IPGO_QTY,ORDQTY,"
-    "style_code,SALEAMT,SALEWHAN"
+    "CALDAY,PLANT,sku,style_code,STOCK_CHANGE_QTY,SALE_QTY,IPGO_QTY,BASE_STOCK_QTY,"
+    "SALEAMT,SALEWHAN"
 )
 
 
@@ -555,15 +555,12 @@ def fetch_raw_file_rows_by_calday_windows(
 _RAW_FILE_ERP_COL_LOWERCASE = {
     "calday",
     "plant",
-    "material",
-    "sale",
-    "sstoc_tmp_qty",
-    "hstoc_qty",
     "ipgo_qty",
-    "ordqty",
+    "sale_qty",
+    "base_stock_qty",
+    "stock_change_qty",
     "saleamt",
     "salewhan",
-    "sstoc_tmp_amt",
     "style_code",
 }
 _LEGACY_FINAL_COLS = {"sku", "sku_name", "plant_name"}
@@ -998,7 +995,7 @@ def build_compare_table_for_final_option(
     apply_ratio_forecast: bool,
 ) -> Optional[Tuple[pd.DataFrame, str, Optional[int], Optional[int]]]:
     """
-    final의 SKU(=MATERIAL) 한 조합에 대해 주차 비교표를 계산합니다.
+    final의 SKU(sku) 한 조합에 대해 주차 비교표를 계산합니다.
     plc에 해당 아이템코드가 없으면 '평균' 행으로 시계열을 만듭니다(내부에서 처리).
     그 외 오류 시 None.
     반환: (비교표, shape_type 라벨, peak_week ISO, peak_month 1~12)
@@ -1690,7 +1687,7 @@ def extract_item_code_from_sku(sku: str) -> str:
 
 
 def style_code_from_material(material: str) -> str:
-    """final의 MATERIAL(또는 sku) 앞 10자리를 스타일코드로 사용합니다."""
+    """final의 sku(또는 legacy material) 앞 10자리를 스타일코드로 사용합니다."""
     s = str(material).strip()
     return s[:10] if s else ""
 
@@ -1708,31 +1705,20 @@ def prepare_final_df(final_df: pd.DataFrame) -> pd.DataFrame:
     df = attach_final_sheet_sale_columns(final_df.copy())
 
     # --------------------------
-    # 1) 신버전(final DB) 감지
+    # 1) 신버전(final DB) 감지 (RAW FILE 집계 스키마)
     # --------------------------
-    new_cols = {"CALDAY", "PLANT", "MATERIAL", "SALE"}
+    new_cols = {"CALDAY", "PLANT", "sku", "SALE_QTY"}
     is_new_schema = all(c in df.columns for c in new_cols)
 
     if is_new_schema:
         # 신 스키마 -> 표준 스키마로 매핑
         df = df.copy()
 
-        df["sku"] = df["MATERIAL"].astype(str).str.strip()
-        df["sku_name"] = df.get("MATERIAL", "").astype(str).str.strip()
+        df["sku"] = df["sku"].astype(str).str.strip()
+        df["sku_name"] = df["sku"].astype(str).str.strip()
         df["plant_name"] = df.get("PLANT", "전체").astype(str).str.strip().replace("", "전체")
 
-        sale_raw = df["SALE"].apply(clean_number).fillna(0)
-        if "SSTOC_TMP_QTY" in df.columns:
-            sstoc = df["SSTOC_TMP_QTY"].apply(clean_number)
-        else:
-            sstoc = pd.Series(np.nan, index=df.index, dtype=float)
-
-        # SSTOC_TMP_QTY 음수 행: 판매량=|SALE|, 출고량(회전 등)=|SSTOC|-|SALE|
-        # (양수 SSTOC는 분배량으로만 반영, 음수 행의 분배량 증분은 없음)
-        mask_sstoc_neg = sstoc.notna() & (sstoc < 0)
-
-        df["판매량"] = sale_raw.astype(float)
-        df.loc[mask_sstoc_neg, "판매량"] = sale_raw.loc[mask_sstoc_neg].abs()
+        df["판매량"] = df["SALE_QTY"].apply(clean_number).fillna(0).astype(float)
 
         # 날짜는 CALDAY(YYYYMMDD) 기반
         calday = df["CALDAY"].astype(str).str.strip()
@@ -1740,29 +1726,17 @@ def prepare_final_df(final_df: pd.DataFrame) -> pd.DataFrame:
         calday = calday.str.replace(r"\.0$", "", regex=True)
         df["날짜"] = pd.to_datetime(calday, format="%Y%m%d", errors="coerce")
 
-        # 재고/입고/주문을 기존 화면의 보조 지표로 연결(있으면)
-        # - 기초재고: HSTOC_QTY
-        # - 분배량: IPGO + SSTOC_TMP_QTY(양수만)
-        # - 출고량(회전 등): 기본 ORDQTY, SSTOC 음수 행은 |SSTOC|-|SALE|
-        if "HSTOC_QTY" in df.columns:
-            df["기초재고"] = df["HSTOC_QTY"].apply(clean_number)
-        ipgo = (
-            df["IPGO_QTY"].apply(clean_number).fillna(0)
+        # 집계 테이블 기반(B)에서는 RAW FILE에 이미 필요한 지표가 들어있으므로 그대로 매핑만 수행
+        df["분배량"] = (
+            df["IPGO_QTY"].apply(clean_number).fillna(0).astype(float)
             if "IPGO_QTY" in df.columns
-            else pd.Series(0.0, index=df.index, dtype=float)
+            else 0.0
         )
-        sstoc_pos = sstoc.fillna(0).clip(lower=0)
-        df["분배량"] = ipgo.astype(float) + sstoc_pos.astype(float)
-
-        ordqty = (
-            df["ORDQTY"].apply(clean_number).fillna(0)
-            if "ORDQTY" in df.columns
-            else pd.Series(0.0, index=df.index, dtype=float)
+        df["기초재고"] = (
+            df["BASE_STOCK_QTY"].apply(clean_number)
+            if "BASE_STOCK_QTY" in df.columns
+            else np.nan
         )
-        df["출고량(회전 등)"] = ordqty.astype(float)
-        df.loc[mask_sstoc_neg, "출고량(회전 등)"] = (
-            sstoc.loc[mask_sstoc_neg].abs() - sale_raw.loc[mask_sstoc_neg].abs()
-        ).astype(float)
 
         # item_code는 기존 plc db(아이템코드) 매칭용인데,
         # 신 sku(MATERIAL)가 영문+숫자 조합일 수 있어 기본은 기존 규칙을 유지하되,
@@ -2006,7 +1980,7 @@ def _persist_compare_extras_from_secrets() -> bool:
 def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     """
     sku_weekly_forecast 테이블만 전면 갱신합니다.
-    RAW FILE에 나타난 (SKU/MATERIAL × 매장 plant_name) 조합마다 계산 후 일괄 INSERT.
+    RAW FILE에 나타난 (SKU(sku) × 매장 plant_name) 조합마다 계산 후 일괄 INSERT.
     매출 형태(단봉/쌍봉 등)는 로직으로만 판별합니다.
     """
     if _create_supabase_client is None:
