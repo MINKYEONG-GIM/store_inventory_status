@@ -138,6 +138,16 @@ def to_int_or_none(value):
     return int(round(float(x)))
 
 
+def extract_item_code(sku):
+    """SKU 문자열의 3·4번째 문자(1-based) → Python 인덱스 [2:4]. 예: SPMTG37G02 → MT"""
+    if sku is None or pd.isna(sku):
+        return None
+    s = str(sku).strip()
+    if len(s) < 4:
+        return None
+    return s[2:4]
+
+
 def load_raw_file_df(client) -> pd.DataFrame:
     rows = fetch_all_rows(client, RAW_FILE_TABLE, RAW_FILE_SELECT, batch_size=1000)
     df = pd.DataFrame(rows)
@@ -170,7 +180,7 @@ def load_raw_file_df(client) -> pd.DataFrame:
 def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     """
     RAW FILE 각 행을 거의 그대로 sku_weekly_forecast로 옮김.
-    추가되는 것은 year_week, week_no 뿐.
+    추가: year_week, week_no, sku에서 추출한 item_code.
     """
     if raw_df.empty:
         return []
@@ -180,6 +190,7 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     for _, r in raw_df.iterrows():
         plant = r.get("PLANT")
         sku = r.get("sku")
+        item_code = extract_item_code(sku)
 
         rows.append({
             "year_week": r.get("year_week"),
@@ -187,6 +198,7 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
             "style_code": str(r.get("style_code")).strip() if pd.notna(r.get("style_code")) else None,
             "sku": str(sku).strip() if pd.notna(sku) else None,
             "plant": str(plant).strip() if pd.notna(plant) else None,
+            "item_code": item_code,
             "begin_stock": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "inbound_qty": to_int_or_none(r.get("IPGO_QTY")),
             "week_no": to_int_or_none(r.get("week_no")),
