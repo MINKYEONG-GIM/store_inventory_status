@@ -19,7 +19,6 @@ PLANT,
 sku,
 style_code,
 item_code,
-STOCK_CHANGE_QTY,
 SALE_QTY,
 IPGO_QTY,
 BASE_STOCK_QTY
@@ -139,10 +138,17 @@ def normalize_year_week(yw):
     return s
 
 
-def to_int(value, default=0):
+def to_float_or_none(value):
     x = pd.to_numeric(value, errors="coerce")
     if pd.isna(x):
-        return default
+        return None
+    return float(x)
+
+
+def to_int_or_none(value):
+    x = pd.to_numeric(value, errors="coerce")
+    if pd.isna(x):
+        return None
     return int(round(float(x)))
 
 
@@ -160,14 +166,15 @@ def load_raw_file_df(client) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    for col in ["SALE_QTY", "IPGO_QTY", "STOCK_CHANGE_QTY", "BASE_STOCK_QTY"]:
+    for col in ["SALE_QTY", "IPGO_QTY", "BASE_STOCK_QTY"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["year_week"])
     df["year_week"] = df["year_week"].apply(normalize_year_week)
     df = df.dropna(subset=["year_week"])
     df = df[df["sku"] != ""]
+    df = df[df["PLANT"] != ""]
 
     return df
 
@@ -200,23 +207,22 @@ def year_week_to_week_no(year_week: str):
 
 
 def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
+    """
+    키: year_week(YEAR_WEEK), PLANT, sku(SKU).
+    SALE_QTY / BASE_STOCK_QTY / IPGO_QTY는 RAW FILE 해당 컬럼 값을 집계 없이 그대로 사용.
+    동일 키가 여러 줄이면 id 기준 마지막 행을 사용.
+    """
     if raw_df.empty:
         return []
 
-    grouped = (
-        raw_df.groupby(
-            ["year_week", "PLANT", "style_code", "sku", "item_code"],
-            as_index=False,
-        )
-        .agg({
-            "SALE_QTY": "sum",
-            "IPGO_QTY": "sum",
-            "STOCK_CHANGE_QTY": "sum",
-            "BASE_STOCK_QTY": "sum",
-        })
+    work = raw_df.copy()
+    if "id" in work.columns:
+        work = work.sort_values("id")
+    work = work.drop_duplicates(
+        subset=["year_week", "PLANT", "sku"],
+        keep="last",
     )
 
-    merged = grouped
     if not plc_df.empty:
         plc_specific = plc_df[plc_df["item_code"] != "평균"].copy()
         plc_specific = plc_specific.dropna(subset=["year_week"])
@@ -225,7 +231,7 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
         plc_specific = plc_specific.drop_duplicates(
             subset=["item_code", "year_week"], keep="last"
         )
-        merged = grouped.merge(
+        merged = work.merge(
             plc_specific[["item_code", "year_week", "item_name"]],
             on=["item_code", "year_week"],
             how="left",
@@ -243,7 +249,7 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
         )
         merged.loc[empty_name_mask, "final_item_name"] = merged["avg_item_name"]
     else:
-        merged = grouped.copy()
+        merged = work.copy()
         merged["final_item_name"] = None
 
     rows = []
@@ -261,15 +267,14 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
 
         rows.append({
             "year_week": year_week,
-            "sale_qty": to_int(r["SALE_QTY"], 0),
-            "style_code": style_code,
-            "sku": sku,
-            "plant": plant,
-            "sku_name": str(final_item_name).strip(),
-            "store_name": plant,
-            "begin_stock": to_int(r["BASE_STOCK_QTY"], 0),
-            "inbound_qty": to_int(r["IPGO_QTY"], 0),
-            "outbound_qty": to_int(r["STOCK_CHANGE_QTY"], 0),
+            "SALE_QTY": to_float_or_none(r["SALE_QTY"]),
+            "style_code": style_code or None,
+            "sku": sku or None,
+            "plant": plant or None,
+            "sku_name": str(final_item_name).strip() or None,
+            "store_name": plant or None,
+            "BASE_STOCK_QTY": to_int_or_none(r["BASE_STOCK_QTY"]),
+            "IPGO_QTY": to_int_or_none(r["IPGO_QTY"]),
             "week_no": week_no,
         })
 
@@ -302,7 +307,7 @@ def run_job():
 
 st.set_page_config(page_title="sku_weekly_forecast 적재", layout="wide")
 st.title("sku_weekly_forecast 단순 적재")
-st.write("RAW FILE + item_plc -> sku_weekly_forecast")
+st.write("RAW FILE (YEAR_WEEK, PLANT, SKU) 수량 그대로 + item_plc -> sku_weekly_forecast")
 
 if st.button("실행"):
     try:
