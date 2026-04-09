@@ -29,14 +29,7 @@ ITEM_PLC_SELECT = """
 id,
 item_code,
 item_name,
-year_week,
-month,
-sales,
-last_year_ratio_pct,
-shape_type,
-stage,
-peak_week,
-peak_month
+year_week
 """.replace("\n", "").replace(" ", "")
 
 
@@ -186,12 +179,9 @@ def load_item_plc_df(client) -> pd.DataFrame:
     if df.empty:
         return df
 
-    for col in ["item_code", "item_name", "year_week", "stage", "shape_type"]:
+    for col in ["item_code", "item_name", "year_week"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-
-    if "peak_week" in df.columns:
-        df["peak_week"] = pd.to_numeric(df["peak_week"], errors="coerce")
 
     if "year_week" in df.columns:
         df["year_week"] = df["year_week"].apply(normalize_year_week)
@@ -199,18 +189,24 @@ def load_item_plc_df(client) -> pd.DataFrame:
     return df
 
 
+def year_week_to_week_no(year_week: str):
+    """예: 2026-12 -> 12"""
+    if not year_week or "-" not in year_week:
+        return None
+    try:
+        return int(str(year_week).split("-", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
 def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
     if raw_df.empty:
         return []
 
-    if plc_df.empty:
-        raise ValueError("item_plc 테이블이 비어 있습니다.")
-
-    # 1) RAW FILE 주차 단위 집계
     grouped = (
         raw_df.groupby(
             ["year_week", "PLANT", "style_code", "sku", "item_code"],
-            as_index=False
+            as_index=False,
         )
         .agg({
             "SALE_QTY": "sum",
@@ -220,66 +216,40 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
         })
     )
 
-    # 2) item_code별 PLC — (item_code, year_week)당 한 행만 두고 stage 등 조인
-    plc_specific = plc_df[plc_df["item_code"] != "평균"].copy()
-    plc_specific = plc_specific.dropna(subset=["year_week"])
-    if "id" in plc_specific.columns:
-        plc_specific = plc_specific.sort_values("id")
-    plc_specific = plc_specific.drop_duplicates(subset=["item_code", "year_week"], keep="last")
-
-    # 3) 평균 PLC
-    plc_avg = plc_df[plc_df["item_code"] == "평균"].copy()
-    plc_avg = plc_avg.rename(columns={
-        "stage": "avg_stage",
-        "peak_week": "avg_peak_week",
-        "item_name": "avg_item_name",
-        "shape_type": "avg_shape_type",
-    })
-
-    # 4) 먼저 item_code + year_week로 매칭
-    merged = grouped.merge(
-        plc_specific[["item_code", "year_week", "stage", "peak_week", "item_name", "shape_type"]],
-        on=["item_code", "year_week"],
-        how="left"
-    )
-
-    # 5) 못 붙은 행은 평균값 붙이기
-    merged = merged.merge(
-        plc_avg[["year_week", "avg_stage", "avg_peak_week", "avg_item_name", "avg_shape_type"]],
-        on="year_week",
-        how="left"
-    )
-
-    # 6) specific 우선, 없으면 average 사용
-    merged["final_stage"] = merged["stage"]
-    merged.loc[merged["final_stage"].isna() | (merged["final_stage"].astype(str).str.strip() == ""), "final_stage"] = merged["avg_stage"]
-
-    merged["final_shape_type"] = merged["shape_type"]
-    merged.loc[
-        merged["final_shape_type"].isna() | (merged["final_shape_type"].astype(str).str.strip() == ""),
-        "final_shape_type",
-    ] = merged["avg_shape_type"]
-
-    merged["final_peak_week"] = merged["peak_week"]
-    merged.loc[merged["final_peak_week"].isna(), "final_peak_week"] = merged["avg_peak_week"]
-
-    merged["final_item_name"] = merged["item_name"]
-    empty_name_mask = merged["final_item_name"].isna() | (merged["final_item_name"].astype(str).str.strip() == "")
-    merged.loc[empty_name_mask, "final_item_name"] = merged["avg_item_name"]
+    merged = grouped
+    if not plc_df.empty:
+        plc_specific = plc_df[plc_df["item_code"] != "평균"].copy()
+        plc_specific = plc_specific.dropna(subset=["year_week"])
+        if "id" in plc_specific.columns:
+            plc_specific = plc_specific.sort_values("id")
+        plc_specific = plc_specific.drop_duplicates(
+            subset=["item_code", "year_week"], keep="last"
+        )
+        merged = grouped.merge(
+            plc_specific[["item_code", "year_week", "item_name"]],
+            on=["item_code", "year_week"],
+            how="left",
+        )
+        plc_avg = plc_df[plc_df["item_code"] == "평균"].copy()
+        plc_avg = plc_avg.rename(columns={"item_name": "avg_item_name"})
+        merged = merged.merge(
+            plc_avg[["year_week", "avg_item_name"]],
+            on="year_week",
+            how="left",
+        )
+        merged["final_item_name"] = merged["item_name"]
+        empty_name_mask = merged["final_item_name"].isna() | (
+            merged["final_item_name"].astype(str).str.strip() == ""
+        )
+        merged.loc[empty_name_mask, "final_item_name"] = merged["avg_item_name"]
+    else:
+        merged = grouped.copy()
+        merged["final_item_name"] = None
 
     rows = []
-
     for _, r in merged.iterrows():
         year_week = str(r["year_week"]).strip()
-        peak_week = r["final_peak_week"]
-
-        is_peak_week = False
-        try:
-            if pd.notna(peak_week):
-                week_no = int(year_week.split("-")[1])
-                is_peak_week = week_no == int(peak_week)
-        except Exception:
-            is_peak_week = False
+        week_no = year_week_to_week_no(year_week)
 
         sku = str(r["sku"]).strip()
         plant = str(r["PLANT"]).strip()
@@ -289,25 +259,19 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
         if pd.isna(final_item_name) or str(final_item_name).strip() == "":
             final_item_name = sku
 
-        row = {
+        rows.append({
             "year_week": year_week,
             "sale_qty": to_int(r["SALE_QTY"], 0),
-            "stage": None if pd.isna(r["final_stage"]) or str(r["final_stage"]).strip() == "" else str(r["final_stage"]).strip(),
-            "shape_type": None if pd.isna(r["final_shape_type"]) or str(r["final_shape_type"]).strip() == "" else str(r["final_shape_type"]).strip(),
             "style_code": style_code,
             "sku": sku,
-            "is_peak_week": is_peak_week,
             "plant": plant,
-            "avg_discount_rate": None,
             "sku_name": str(final_item_name).strip(),
             "store_name": plant,
             "begin_stock": to_int(r["BASE_STOCK_QTY"], 0),
-            "is_forecast": False,
-            "loss": 0,
             "inbound_qty": to_int(r["IPGO_QTY"], 0),
             "outbound_qty": to_int(r["STOCK_CHANGE_QTY"], 0),
-        }
-        rows.append(row)
+            "week_no": week_no,
+        })
 
     return rows
 
