@@ -20,7 +20,6 @@ style_code,
 STOCK_CHANGE_QTY,
 SALE_QTY,
 IPGO_QTY,
-BASE_STOCK_QTY,
 item_code
 """.replace("\n", "").replace(" ", "")
 
@@ -157,24 +156,42 @@ def load_raw_file_df(client) -> pd.DataFrame:
     df["CALDAY"] = df["CALDAY"].apply(
         lambda x: str(x).replace(".0", "").strip() if pd.notna(x) else None
     )
+    df["CALDAY_DT"] = pd.to_datetime(df["CALDAY"], format="%Y%m%d", errors="coerce")
     df["year_week"] = df["CALDAY"].apply(calday_to_year_week)
     df["week_no"] = df["year_week"].apply(year_week_to_week_no)
 
-    # 문자열 컬럼 정리
     for col in ["PLANT", "sku", "style_code", "item_code"]:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else None)
 
-    # 숫자 컬럼 정리
-    for col in ["STOCK_CHANGE_QTY", "SALE_QTY", "IPGO_QTY", "BASE_STOCK_QTY"]:
+    for col in ["STOCK_CHANGE_QTY", "SALE_QTY", "IPGO_QTY"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # CALDAY가 잘못되어 year_week 계산 안 되는 행만 제외
-    df = df.dropna(subset=["year_week"])
+    df = df.dropna(subset=["CALDAY_DT", "year_week", "PLANT", "sku"])
 
-    return df
+    weekly_df = (
+        df.groupby(
+            ["PLANT", "sku", "style_code", "item_code", "year_week", "week_no"],
+            dropna=False,
+            as_index=False
+        )
+        .agg({
+            "IPGO_QTY": "sum",
+            "SALE_QTY": "sum"
+        })
+    )
 
+    weekly_df = weekly_df.sort_values(
+        ["PLANT", "sku", "year_week"]
+    ).reset_index(drop=True)
+
+    weekly_df["BASE_STOCK_QTY"] = (
+        weekly_df.groupby(["PLANT", "sku"])["IPGO_QTY"].cumsum()
+        - weekly_df.groupby(["PLANT", "sku"])["SALE_QTY"].cumsum()
+    )
+
+    return weekly_df
 
 def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     """
@@ -189,7 +206,7 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     for _, r in raw_df.iterrows():
         plant = r.get("PLANT")
         sku = r.get("sku")
-        item_code = extract_item_code(sku)
+        item_code = r.get("item_code") or extract_item_code(sku)
 
         rows.append({
             "year_week": r.get("year_week"),
