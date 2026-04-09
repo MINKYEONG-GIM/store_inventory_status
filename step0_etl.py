@@ -1,310 +1,311 @@
-"""
-RAW FILE + item_plc → sku_weekly_forecast 단순 적재 스크립트.
-환경변수 DATABASE_URL (또는 PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE) 로 연결합니다.
-
-  pip install psycopg2-binary pandas
-
-실행: python "import math.py"
-"""
-
-from __future__ import annotations
-
 import os
-import sys
-from datetime import date
-from typing import Any, Dict, List, Optional
-
 import pandas as pd
+import streamlit as st
 
 try:
-    import psycopg2
-    from psycopg2.extras import execute_batch
+    from supabase import create_client
 except ImportError:
-    print("psycopg2-binary 가 필요합니다: pip install psycopg2-binary", file=sys.stderr)
-    raise
+    create_client = None
 
 
-def get_conn():
-    url = os.getenv("DATABASE_URL", "").strip()
-    if url:
-        return psycopg2.connect(url)
-    return psycopg2.connect(
-        host=os.getenv("PGHOST", "localhost"),
-        port=os.getenv("PGPORT", "5432"),
-        user=os.getenv("PGUSER", "postgres"),
-        password=os.getenv("PGPASSWORD", ""),
-        dbname=os.getenv("PGDATABASE", "postgres"),
-    )
+RAW_FILE_TABLE = "RAW FILE"
+ITEM_PLC_TABLE = "item_plc"
+SKU_WEEKLY_FORECAST_TABLE = "sku_weekly_forecast"
+
+RAW_FILE_SELECT = """
+id,
+CALDAY,
+PLANT,
+sku,
+style_code,
+item_code,
+STOCK_CHANGE_QTY,
+SALE_QTY,
+IPGO_QTY,
+BASE_STOCK_QTY
+""".replace("\n", "").replace(" ", "")
+
+ITEM_PLC_SELECT = """
+id,
+item_code,
+item_name,
+year_week,
+month,
+sales,
+last_year_ratio_pct,
+shape_type,
+stage,
+peak_week,
+peak_month
+""".replace("\n", "").replace(" ", "")
 
 
-def item_code_from_sku(sku: str) -> str:
-    s = str(sku).strip()
-    if len(s) >= 4:
-        return s[2:4]
-    return s
+def get_supabase_client():
+    if create_client is None:
+        raise ImportError("supabase 패키지가 없습니다. pip install supabase 필요")
+
+    url = ""
+    key = ""
+
+    if "supabase" in st.secrets:
+        url = str(st.secrets["supabase"].get("url", "")).strip()
+        key = str(
+            st.secrets["supabase"].get("service_role_key")
+            or st.secrets["supabase"].get("key")
+            or ""
+        ).strip()
+
+    if not url:
+        url = os.getenv("SUPABASE_URL", "").strip()
+    if not key:
+        key = (
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+            or os.getenv("SUPABASE_KEY", "")
+        ).strip()
+
+    if not url or not key:
+        raise ValueError("Supabase URL 또는 KEY가 없습니다.")
+
+    return create_client(url, key)
 
 
-def calday_to_year_week(calday: Any) -> Optional[str]:
-    try:
-        d = int(float(str(calday).replace(".0", "")))
-        ts = pd.to_datetime(str(d), format="%Y%m%d", errors="coerce")
-        if pd.isna(ts):
-            return None
-        y, w, _ = ts.isocalendar()
-        return f"{int(y)}-{int(w)}"
-    except Exception:
-        return None
+def fetch_all_rows(client, table_name: str, select_sql: str, batch_size: int = 1000):
+    rows = []
+    offset = 0
 
-
-def load_raw_file(conn) -> pd.DataFrame:
-    q = """
-    SELECT "CALDAY", "PLANT", sku, style_code,
-           "SALE_QTY", "IPGO_QTY", "BASE_STOCK_QTY", "STOCK_CHANGE_QTY"
-    FROM public."RAW FILE"
-    """
-    df = pd.read_sql_query(q, conn)
-    if df.empty:
-        return df
-    df = df.rename(columns={c: str(c) for c in df.columns})
-    df["year_week"] = df["CALDAY"].map(calday_to_year_week)
-    df = df.dropna(subset=["year_week", "sku"])
-    df["sku"] = df["sku"].astype(str).str.strip()
-    df["PLANT"] = df.get("PLANT", "").astype(str).str.strip().replace("", "전체")
-    for col in ("SALE_QTY", "IPGO_QTY", "BASE_STOCK_QTY", "STOCK_CHANGE_QTY"):
-        if col not in df.columns:
-            df[col] = 0.0
-        else:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    agg = (
-        df.groupby(["PLANT", "sku", "year_week"], as_index=False)
-        .agg(
-            style_code=("style_code", lambda s: s.dropna().astype(str).str.strip().iloc[0] if len(s.dropna()) else ""),
-            SALE_QTY=("SALE_QTY", "sum"),
-            IPGO_QTY=("IPGO_QTY", "sum"),
-            BASE_STOCK_QTY=("BASE_STOCK_QTY", "mean"),
-            STOCK_CHANGE_QTY=("STOCK_CHANGE_QTY", "sum"),
+    while True:
+        resp = (
+            client.table(table_name)
+            .select(select_sql)
+            .range(offset, offset + batch_size - 1)
+            .execute()
         )
-    )
-    agg["item_code"] = agg["sku"].map(item_code_from_sku)
-    return agg
+        data = resp.data or []
 
+        if not data:
+            break
 
-def load_item_plc(conn) -> pd.DataFrame:
-    q = """
-    SELECT item_code, item_name, year_week, month, sales, stage,
-           peak_week, peak_month, last_year_ratio_pct
-    FROM public.item_plc
-    """
-    df = pd.read_sql_query(q, conn)
-    if df.empty:
-        return df
-    df["item_code"] = df["item_code"].astype(str).str.strip()
-    df["year_week"] = df["year_week"].astype(str).str.strip()
-    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
-    return df
+        rows.extend(data)
 
+        if len(data) < batch_size:
+            break
 
-PLC_FALLBACK_ITEM_CODE = "평균"
-
-
-def split_item_plc(plc: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """일반 행 vs item_code='평균' fallback. 평균은 year_week당 한 행만 쓴다."""
-    if plc.empty:
-        return plc, plc.iloc[0:0].copy()
-    is_avg = plc["item_code"] == PLC_FALLBACK_ITEM_CODE
-    plc_specific = plc[~is_avg].copy()
-    plc_avg = plc[is_avg].copy()
-    if not plc_avg.empty:
-        plc_avg = plc_avg.drop_duplicates(subset=["year_week"], keep="first")
-    if not plc_specific.empty:
-        plc_specific = plc_specific.drop_duplicates(subset=["item_code", "year_week"], keep="first")
-    return plc_specific, plc_avg
-
-
-def year_week_to_iso_week(yw: str) -> Optional[int]:
-    try:
-        parts = str(yw).strip().split("-")
-        if len(parts) >= 2:
-            return int(parts[1])
-    except Exception:
-        pass
-    return None
-
-
-def _plc_columns_for_join(plc_sp: pd.DataFrame) -> List[str]:
-    base = {"item_code", "year_week"}
-    return [c for c in plc_sp.columns if c not in base]
-
-
-def attach_plc_with_fallback(raw_agg: pd.DataFrame, plc: pd.DataFrame) -> pd.DataFrame:
-    """
-    1) item_plc: RAW의 item_code + year_week 와 동일한 행으로 매칭
-    2) 없으면 item_plc.item_code == '평균' 인 행 중 같은 year_week 사용
-    """
-    if raw_agg.empty:
-        return raw_agg
-    if plc.empty:
-        out = raw_agg.copy()
-        for c in ("item_name", "sales", "stage", "peak_week", "peak_month", "month", "last_year_ratio_pct"):
-            out[c] = pd.NA
-        return out
-
-    plc_sp, plc_avg = split_item_plc(plc)
-    plc_cols = _plc_columns_for_join(plc_sp) if not plc_sp.empty else _plc_columns_for_join(plc)
-
-    if plc_sp.empty:
-        m = raw_agg.copy()
-        m["_merge"] = "left_only"
-    else:
-        m = raw_agg.merge(
-            plc_sp,
-            on=["item_code", "year_week"],
-            how="left",
-            indicator=True,
-        )
-
-    if not plc_avg.empty:
-        fb = plc_avg.drop(columns=["item_code"], errors="ignore").copy()
-        rename_fb = {c: f"{c}_fb" for c in fb.columns if c != "year_week"}
-        fb = fb.rename(columns=rename_fb)
-        m = m.merge(fb, on="year_week", how="left")
-
-    for c in plc_cols:
-        c_fb = f"{c}_fb"
-        if c_fb not in m.columns:
-            continue
-        if c in m.columns:
-            m[c] = m[c].where(m["_merge"] == "both", m[c_fb])
-        else:
-            m[c] = m[c_fb]
-
-    drop_cols = ["_merge"] + [c for c in m.columns if c.endswith("_fb")]
-    m = m.drop(columns=[c for c in drop_cols if c in m.columns], errors="ignore")
-    return m
-
-
-def build_forecast_rows(raw_agg: pd.DataFrame, plc: pd.DataFrame) -> List[Dict[str, Any]]:
-    if raw_agg.empty:
-        return []
-
-    today_week = date.today().isocalendar()[1]
-    merged = attach_plc_with_fallback(raw_agg, plc)
-
-    rows: List[Dict[str, Any]] = []
-
-    for _, r in merged.iterrows():
-        plant = str(r.get("PLANT", "전체") or "전체").strip() or "전체"
-        sku = str(r.get("sku", "") or r.get("item_code", "")).strip()
-        yw = str(r.get("year_week", "")).strip()
-        if not yw:
-            continue
-
-        sale_raw = r.get("SALE_QTY")
-        sale_plc = r.get("sales")
-        if pd.notna(sale_raw) and float(sale_raw) != 0:
-            sale_qty = float(sale_raw)
-        elif pd.notna(sale_plc):
-            sale_qty = float(sale_plc)
-        else:
-            sale_qty = 0.0
-
-        stage = r.get("stage")
-        stage_s = "" if pd.isna(stage) else str(stage).strip()
-
-        pw = r.get("peak_week")
-        iso_w = year_week_to_iso_week(yw)
-        is_peak = False
-        if pd.notna(pw) and iso_w is not None:
-            try:
-                is_peak = int(pw) == int(iso_w)
-            except Exception:
-                is_peak = False
-
-        is_forecast = iso_w is not None and iso_w > today_week
-
-        style = r.get("style_code")
-        style_s = "" if pd.isna(style) else str(style).strip()
-
-        name = r.get("item_name")
-        sku_name = "" if pd.isna(name) else str(name).strip()
-
-        base = r.get("BASE_STOCK_QTY")
-        begin_stock = None if pd.isna(base) else int(round(float(base)))
-
-        rows.append(
-            {
-                "year_week": yw,
-                "sale_qty": sale_qty,
-                "stage": stage_s or None,
-                "style_code": style_s or None,
-                "sku": sku or None,
-                "is_peak_week": is_peak,
-                "plant": plant,
-                "avg_discount_rate": None,
-                "sku_name": sku_name or None,
-                "store_name": plant,
-                "begin_stock": begin_stock,
-                "is_forecast": is_forecast,
-                "loss": None,
-                "inbound_qty": int(round(float(r.get("IPGO_QTY") or 0))),
-                "outbound_qty": int(round(float(r.get("STOCK_CHANGE_QTY") or 0))),
-            }
-        )
+        offset += batch_size
 
     return rows
 
 
-def clear_and_insert(conn, rows: List[Dict[str, Any]], batch_size: int = 500) -> int:
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM public.sku_weekly_forecast")
-    conn.commit()
+def delete_all_rows(client, table_name: str, key_col: str):
+    sentinel = "__never_match__"
+    client.table(table_name).delete().neq(key_col, sentinel).execute()
 
+
+def insert_in_chunks(client, table_name: str, rows: list, batch_size: int = 500):
     if not rows:
-        return 0
+        return
 
-    cols = [
-        "year_week",
-        "sale_qty",
-        "stage",
-        "style_code",
-        "sku",
-        "is_peak_week",
-        "plant",
-        "avg_discount_rate",
-        "sku_name",
-        "store_name",
-        "begin_stock",
-        "is_forecast",
-        "loss",
-        "inbound_qty",
-        "outbound_qty",
-    ]
-    placeholders = ", ".join(["%s"] * len(cols))
-    sql = f"""
-    INSERT INTO public.sku_weekly_forecast (
-        {", ".join(cols)}
-    ) VALUES ({placeholders})
+    for i in range(0, len(rows), batch_size):
+        chunk = rows[i:i + batch_size]
+        client.table(table_name).insert(chunk).execute()
+
+
+def calday_to_year_week(calday_value):
     """
+    예: 20260319 -> 2026-12
+    """
+    if pd.isna(calday_value):
+        return None
 
-    tuples = [tuple(row.get(c) for c in cols) for row in rows]
+    s = str(calday_value).strip().replace(".0", "")
+    dt = pd.to_datetime(s, format="%Y%m%d", errors="coerce")
 
-    with conn.cursor() as cur:
-        execute_batch(cur, sql, tuples, page_size=batch_size)
-    conn.commit()
-    return len(rows)
+    if pd.isna(dt):
+        return None
+
+    iso = dt.isocalendar()
+    return f"{int(iso.year)}-{int(iso.week):02d}"
 
 
-def main() -> None:
-    conn = get_conn()
+def to_int(value, default=0):
+    x = pd.to_numeric(value, errors="coerce")
+    if pd.isna(x):
+        return default
+    return int(round(float(x)))
+
+
+def load_raw_file_df(client) -> pd.DataFrame:
+    rows = fetch_all_rows(client, RAW_FILE_TABLE, RAW_FILE_SELECT, batch_size=1000)
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    df["CALDAY"] = df["CALDAY"].apply(lambda x: str(x).replace(".0", "") if pd.notna(x) else x)
+    df["year_week"] = df["CALDAY"].apply(calday_to_year_week)
+
+    for col in ["PLANT", "sku", "style_code", "item_code"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+
+    for col in ["SALE_QTY", "IPGO_QTY", "STOCK_CHANGE_QTY", "BASE_STOCK_QTY"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df = df.dropna(subset=["year_week"])
+    df = df[df["sku"] != ""]
+
+    return df
+
+
+def load_item_plc_df(client) -> pd.DataFrame:
+    rows = fetch_all_rows(client, ITEM_PLC_TABLE, ITEM_PLC_SELECT, batch_size=1000)
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    for col in ["item_code", "item_name", "year_week", "stage", "shape_type"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+
+    if "peak_week" in df.columns:
+        df["peak_week"] = pd.to_numeric(df["peak_week"], errors="coerce")
+
+    return df
+
+
+def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
+    if raw_df.empty:
+        return []
+
+    if plc_df.empty:
+        raise ValueError("item_plc 테이블이 비어 있습니다.")
+
+    # 1) RAW FILE 주차 단위 집계
+    grouped = (
+        raw_df.groupby(
+            ["year_week", "PLANT", "style_code", "sku", "item_code"],
+            as_index=False
+        )
+        .agg({
+            "SALE_QTY": "sum",
+            "IPGO_QTY": "sum",
+            "STOCK_CHANGE_QTY": "sum",
+            "BASE_STOCK_QTY": "sum",
+        })
+    )
+
+    # 2) item_code별 PLC
+    plc_specific = plc_df.copy()
+
+    # 3) 평균 PLC
+    plc_avg = plc_df[plc_df["item_code"] == "평균"].copy()
+    plc_avg = plc_avg.rename(columns={
+        "stage": "avg_stage",
+        "peak_week": "avg_peak_week",
+        "item_name": "avg_item_name",
+        "shape_type": "avg_shape_type",
+    })
+
+    # 4) 먼저 item_code + year_week로 매칭
+    merged = grouped.merge(
+        plc_specific[["item_code", "year_week", "stage", "peak_week", "item_name", "shape_type"]],
+        on=["item_code", "year_week"],
+        how="left"
+    )
+
+    # 5) 못 붙은 행은 평균값 붙이기
+    merged = merged.merge(
+        plc_avg[["year_week", "avg_stage", "avg_peak_week", "avg_item_name", "avg_shape_type"]],
+        on="year_week",
+        how="left"
+    )
+
+    # 6) specific 우선, 없으면 average 사용
+    merged["final_stage"] = merged["stage"]
+    merged.loc[merged["final_stage"].isna() | (merged["final_stage"].astype(str).str.strip() == ""), "final_stage"] = merged["avg_stage"]
+
+    merged["final_peak_week"] = merged["peak_week"]
+    merged.loc[merged["final_peak_week"].isna(), "final_peak_week"] = merged["avg_peak_week"]
+
+    merged["final_item_name"] = merged["item_name"]
+    empty_name_mask = merged["final_item_name"].isna() | (merged["final_item_name"].astype(str).str.strip() == "")
+    merged.loc[empty_name_mask, "final_item_name"] = merged["avg_item_name"]
+
+    rows = []
+
+    for _, r in merged.iterrows():
+        year_week = str(r["year_week"]).strip()
+        peak_week = r["final_peak_week"]
+
+        is_peak_week = False
+        try:
+            if pd.notna(peak_week):
+                week_no = int(year_week.split("-")[1])
+                is_peak_week = week_no == int(peak_week)
+        except Exception:
+            is_peak_week = False
+
+        sku = str(r["sku"]).strip()
+        plant = str(r["PLANT"]).strip()
+        style_code = str(r["style_code"]).strip()
+
+        final_item_name = r.get("final_item_name")
+        if pd.isna(final_item_name) or str(final_item_name).strip() == "":
+            final_item_name = sku
+
+        row = {
+            "year_week": year_week,
+            "sale_qty": to_int(r["SALE_QTY"], 0),
+            "stage": None if pd.isna(r["final_stage"]) or str(r["final_stage"]).strip() == "" else str(r["final_stage"]).strip(),
+            "style_code": style_code,
+            "sku": sku,
+            "is_peak_week": is_peak_week,
+            "plant": plant,
+            "avg_discount_rate": None,
+            "sku_name": str(final_item_name).strip(),
+            "store_name": plant,
+            "begin_stock": to_int(r["BASE_STOCK_QTY"], 0),
+            "is_forecast": False,
+            "loss": 0,
+            "inbound_qty": to_int(r["IPGO_QTY"], 0),
+            "outbound_qty": to_int(r["STOCK_CHANGE_QTY"], 0),
+        }
+        rows.append(row)
+
+    return rows
+
+
+def run_job():
+    client = get_supabase_client()
+
+    st.write("1. RAW FILE 불러오는 중...")
+    raw_df = load_raw_file_df(client)
+    st.write(f"RAW FILE rows: {len(raw_df):,}")
+
+    st.write("2. item_plc 불러오는 중...")
+    plc_df = load_item_plc_df(client)
+    st.write(f"item_plc rows: {len(plc_df):,}")
+
+    st.write("3. sku_weekly_forecast row 생성 중...")
+    rows = build_forecast_rows(raw_df, plc_df)
+    st.write(f"생성 rows: {len(rows):,}")
+
+    st.write("4. 기존 sku_weekly_forecast 삭제 중...")
+    delete_all_rows(client, SKU_WEEKLY_FORECAST_TABLE, key_col="sku")
+
+    st.write("5. 새 데이터 insert 중...")
+    insert_in_chunks(client, SKU_WEEKLY_FORECAST_TABLE, rows, batch_size=500)
+
+    st.success(f"완료: {len(rows):,}건 적재")
+
+
+st.set_page_config(page_title="sku_weekly_forecast 적재", layout="wide")
+st.title("sku_weekly_forecast 단순 적재")
+st.write("RAW FILE + item_plc -> sku_weekly_forecast")
+
+if st.button("실행"):
     try:
-        raw_agg = load_raw_file(conn)
-        plc = load_item_plc(conn)
-        rows = build_forecast_rows(raw_agg, plc)
-        n = clear_and_insert(conn, rows)
-        print(f"완료: sku_weekly_forecast {n}행 적재 (RAW 집계 {len(raw_agg)}행, item_plc {len(plc)}행)")
-    finally:
-        conn.close()
-
-
-if __name__ == "__main__":
-    main()
+        run_job()
+    except Exception as e:
+        st.error(f"실패: {e}")
