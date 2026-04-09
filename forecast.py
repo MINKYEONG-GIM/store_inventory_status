@@ -364,18 +364,37 @@ def attach_plc_fields_by_itemcode_weekno(base_df: pd.DataFrame, plc_df: pd.DataF
     return result
 
 
-def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int, curr_week: int) -> pd.DataFrame:
+def make_full_weeks_for_base(base_df: pd.DataFrame, target_year: int) -> pd.DataFrame:
     """
-    현재 주차 이하 실제값 row 생성
+    sku / plant / item_code 단위로 1~52주 전체 행 생성
+    """
+    if base_df.empty:
+        return pd.DataFrame()
+
+    keep_cols = [c for c in ["item_code", "style_code", "sku", "plant"] if c in base_df.columns]
+    uniq = base_df[keep_cols].drop_duplicates().copy()
+    uniq["key"] = 1
+
+    weeks = pd.DataFrame({"week_no": list(range(1, 53))})
+    weeks["year_week"] = weeks["week_no"].apply(lambda w: f"{target_year}-{int(w):02d}")
+    weeks["key"] = 1
+
+    full = uniq.merge(weeks, on="key", how="inner").drop(columns=["key"])
+    return full
+
+
+def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: int) -> pd.DataFrame:
+    """
+    target_year 실제값 row 생성
     """
     if sku_df.empty:
         return pd.DataFrame()
 
     work = sku_df.copy()
-    work = work[
-        (work["year"] == curr_year) &
-        (work["week"] <= curr_week)
-    ].copy()
+    work = work[work["year"] == target_year].copy()
+
+    if work.empty:
+        return pd.DataFrame()
 
     merged = attach_plc_fields_by_itemcode_weekno(work, plc_df)
 
@@ -406,40 +425,60 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int
     return pd.DataFrame(rows)
 
 
-def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int, curr_week: int) -> pd.DataFrame:
+def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: int, curr_week: int) -> pd.DataFrame:
     """
-    미래 주차 예측 row 생성
-    기준:
-    예상 시즌 총판매량 = 현재까지 실제 누적 판매량 / 현재까지 누적 ratio
-    미래 sale_qty = 예상 시즌 총판매량 * 미래 주차 ratio
-    loss = max(sale_qty - BASE_STOCK_QTY, 0)
+    sku / plant 별로 1~52주 전체를 만든 뒤,
+    실제값이 없는 미래 주차를 예측으로 채운다.
     """
     if sku_df.empty or plc_df.empty:
         return pd.DataFrame()
 
-    # 올해 데이터만 사용
-    sku_this_year = sku_df[sku_df["year"] == curr_year].copy()
-    plc_this_year = plc_df[plc_df["year"] == curr_year].copy()
+    sku_year = sku_df[sku_df["year"] == target_year].copy()
+    plc_year = plc_df.copy()
 
-    if sku_this_year.empty or plc_this_year.empty:
+    if sku_year.empty:
         return pd.DataFrame()
 
-    # SKU별 현재까지 실제 누적 판매량
+    # 기준 sku/plant/item_code 목록
+    base_keys = sku_year[["item_code", "style_code", "sku", "plant"]].drop_duplicates().copy()
+
+    # 1~52 전체 주차 생성
+    full_weeks = make_full_weeks_for_base(base_keys, target_year)
+
+    # 실제 존재 주차
+    actual_keys = sku_year[["item_code", "style_code", "sku", "plant", "week_no"]].copy()
+    actual_keys["week_no"] = pd.to_numeric(actual_keys["week_no"], errors="coerce")
+    full_weeks["week_no"] = pd.to_numeric(full_weeks["week_no"], errors="coerce")
+
+    merged_full = full_weeks.merge(
+        actual_keys.assign(actual_exists=1),
+        on=["item_code", "style_code", "sku", "plant", "week_no"],
+        how="left"
+    )
+
+    # 실제 없는 주차만 남김
+    missing_weeks = merged_full[merged_full["actual_exists"].isna()].copy()
+
+    # 미래 주차만 예측 대상으로 제한
+    missing_weeks = missing_weeks[missing_weeks["week_no"] > curr_week].copy()
+
+    if missing_weeks.empty:
+        return pd.DataFrame()
+
+    # 현재까지 실제 누적 판매량
     actual_summary = (
-        sku_this_year[sku_this_year["week"] <= curr_week]
+        sku_year[sku_year["week_no"] <= curr_week]
         .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
-        .agg(
-            actual_sale_cum=("SALE_QTY", "sum")
-        )
+        .agg(actual_sale_cum=("SALE_QTY", "sum"))
     )
 
     if actual_summary.empty:
         return pd.DataFrame()
 
-    # 현재 기준 가장 최근 실적 row를 찾아서 재고/입고 가져오기
+    # 가장 최근 실제 주차의 재고/입고
     latest_actual = (
-        sku_this_year[sku_this_year["week"] <= curr_week]
-        .sort_values(["item_code", "sku", "plant", "week"])
+        sku_year[sku_year["week_no"] <= curr_week]
+        .sort_values(["item_code", "sku", "plant", "week_no"])
         .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
         .tail(1)
         .copy()
@@ -450,40 +489,36 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
         "BASE_STOCK_QTY", "IPGO_QTY"
     ]].copy()
 
-    actual_summary = actual_summary.merge(
+    base = actual_summary.merge(
         latest_actual,
         on=["item_code", "style_code", "sku", "plant"],
         how="left"
     )
 
-    # 현재까지 누적 ratio 계산용: 실제 판매가 있는 주차들에 대해 PLC 붙이기
-    actual_weeks = sku_this_year[sku_this_year["week"] <= curr_week][[
-        "item_code", "week_no"
-    ]].copy()
-    actual_weeks = actual_weeks.drop_duplicates()
-
-    actual_weeks = attach_plc_fields_by_itemcode_weekno(actual_weeks, plc_this_year)
+    # 현재까지 누적 ratio
+    actual_weeks = (
+        sku_year[sku_year["week_no"] <= curr_week][["item_code", "week_no"]]
+        .drop_duplicates()
+        .copy()
+    )
+    actual_weeks = attach_plc_fields_by_itemcode_weekno(actual_weeks, plc_year)
 
     ratio_cum = (
         actual_weeks.groupby("item_code", as_index=False)
         .agg(ratio_cum=("last_year_ratio_pct", "sum"))
     )
 
-    base = actual_summary.merge(ratio_cum, on="item_code", how="left")
+    base = base.merge(ratio_cum, on="item_code", how="left")
 
-    # 미래 주차 생성용
-    future_weeks = pd.DataFrame({
-        "week_no": list(range(curr_week + 1, 53))
-    })
-    future_weeks["year_week"] = future_weeks["week_no"].apply(lambda w: f"{curr_year}-{int(w):02d}")
+    # 예측 대상 주차 붙이기
+    expanded = missing_weeks.merge(
+        base,
+        on=["item_code", "style_code", "sku", "plant"],
+        how="left"
+    )
 
-    # sku별 미래 주차 펼치기
-    base["key"] = 1
-    future_weeks["key"] = 1
-    expanded = base.merge(future_weeks, on="key", how="inner").drop(columns=["key"])
-
-    # 미래 주차마다 PLC 붙이기
-    expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_this_year)
+    # 각 미래 주차에 PLC 붙이기
+    expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
 
     def calc_forecast_sale(row):
         actual_sale_cum = pd.to_numeric(row.get("actual_sale_cum"), errors="coerce")
@@ -496,10 +531,8 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
         if ratio_cum <= 0:
             return None
 
-        # ratio가 15면 15%로 가정
         season_total = float(actual_sale_cum) / (float(ratio_cum) / 100.0)
-        forecast_sale = season_total * (float(week_ratio) / 100.0)
-        return float(round(forecast_sale, 2))
+        return float(round(season_total * (float(week_ratio) / 100.0), 2))
 
     expanded["sale_qty"] = expanded.apply(calc_forecast_sale, axis=1)
     expanded["is_peak_week"] = (
@@ -546,7 +579,7 @@ def build_sku_weekly_forecast_2_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame)
 
     plc_df = deduplicate_item_plc(plc_df)
 
-    actual_df = build_actual_rows(sku_df, plc_df, curr_year, curr_week)
+    actual_df = build_actual_rows(sku_df, plc_df, curr_year)
     forecast_df = build_forecast_rows(sku_df, plc_df, curr_year, curr_week)
 
     final_df = pd.concat([actual_df, forecast_df], ignore_index=True)
@@ -554,7 +587,7 @@ def build_sku_weekly_forecast_2_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame)
     if final_df.empty:
         return []
 
-    final_df = final_df.sort_values(["sku", "plant", "year_week"], na_position="last").reset_index(drop=True)
+    final_df = final_df.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
 
     return final_df.to_dict(orient="records")
 
