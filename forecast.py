@@ -102,6 +102,14 @@ def fetch_all_rows(client, table_name: str, select_sql: str, batch_size: int = 1
 
 
 def delete_all_rows(client, table_name: str, key_col: str):
+    """
+    Supabase(PostgREST)는 delete 시 필터가 필요해서,
+    '항상 true'가 되는 조건으로 전체 삭제를 수행한다.
+    """
+    if key_col == "id":
+        client.table(table_name).delete().neq(key_col, -1).execute()
+        return
+
     sentinel = "__never_match__"
     client.table(table_name).delete().neq(key_col, sentinel).execute()
 
@@ -387,8 +395,6 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "sku_name": None if pd.isna(r.get("sku_name")) else str(r.get("sku_name")).strip(),
-            "store_name": None if pd.isna(r.get("store_name")) else str(r.get("store_name")).strip(),
             "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "is_forecast": False,
             "loss": None,
@@ -430,7 +436,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
     if actual_summary.empty:
         return pd.DataFrame()
 
-    # 현재 기준 가장 최근 실적 row를 찾아서 재고/입고/이름 가져오기
+    # 현재 기준 가장 최근 실적 row를 찾아서 재고/입고 가져오기
     latest_actual = (
         sku_this_year[sku_this_year["week"] <= curr_week]
         .sort_values(["item_code", "sku", "plant", "week"])
@@ -441,7 +447,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
 
     latest_actual = latest_actual[[
         "item_code", "style_code", "sku", "plant",
-        "sku_name", "store_name", "BASE_STOCK_QTY", "IPGO_QTY"
+        "BASE_STOCK_QTY", "IPGO_QTY"
     ]].copy()
 
     actual_summary = actual_summary.merge(
@@ -524,8 +530,6 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "sku_name": None if pd.isna(r.get("sku_name")) else str(r.get("sku_name")).strip(),
-            "store_name": None if pd.isna(r.get("store_name")) else str(r.get("store_name")).strip(),
             "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "is_forecast": True,
             "loss": to_int_or_none(r.get("loss")),
@@ -578,7 +582,7 @@ def run_job():
     st.dataframe(preview_df.head(20), use_container_width=True)
 
     st.write("4. 기존 sku_weekly_forecast_2 삭제 중...")
-    delete_all_rows(client, SKU_WEEKLY_FORECAST_2_TABLE, key_col="sku")
+    delete_all_rows(client, SKU_WEEKLY_FORECAST_2_TABLE, key_col="id")
 
     st.write("5. 새 데이터 insert 중...")
     insert_in_chunks(client, SKU_WEEKLY_FORECAST_2_TABLE, rows, batch_size=500)
