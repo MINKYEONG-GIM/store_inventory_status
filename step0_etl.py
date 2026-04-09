@@ -139,7 +139,6 @@ def to_int_or_none(value):
 
 
 def extract_item_code(sku):
-    """SKU 문자열의 3·4번째 문자(1-based) → Python 인덱스 [2:4]. 예: SPMTG37G02 → MT"""
     if sku is None or pd.isna(sku):
         return None
     s = str(sku).strip()
@@ -194,13 +193,13 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
 
         rows.append({
             "year_week": r.get("year_week"),
-            "sale_qty": to_float_or_none(r.get("SALE_QTY")),
+            "SALE_QTY": to_float_or_none(r.get("SALE_QTY")),
             "style_code": str(r.get("style_code")).strip() if pd.notna(r.get("style_code")) else None,
             "sku": str(sku).strip() if pd.notna(sku) else None,
             "plant": str(plant).strip() if pd.notna(plant) else None,
             "item_code": item_code,
-            "begin_stock": to_int_or_none(r.get("BASE_STOCK_QTY")),
-            "inbound_qty": to_int_or_none(r.get("IPGO_QTY")),
+            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
+            "IPGO_QTY": to_int_or_none(r.get("IPGO_QTY")),
             "week_no": to_int_or_none(r.get("week_no")),
         })
 
