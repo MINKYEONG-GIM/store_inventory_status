@@ -254,6 +254,12 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
     merged["final_stage"] = merged["stage"]
     merged.loc[merged["final_stage"].isna() | (merged["final_stage"].astype(str).str.strip() == ""), "final_stage"] = merged["avg_stage"]
 
+    merged["final_shape_type"] = merged["shape_type"]
+    merged.loc[
+        merged["final_shape_type"].isna() | (merged["final_shape_type"].astype(str).str.strip() == ""),
+        "final_shape_type",
+    ] = merged["avg_shape_type"]
+
     merged["final_peak_week"] = merged["peak_week"]
     merged.loc[merged["final_peak_week"].isna(), "final_peak_week"] = merged["avg_peak_week"]
 
@@ -287,6 +293,7 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
             "year_week": year_week,
             "sale_qty": to_int(r["SALE_QTY"], 0),
             "stage": None if pd.isna(r["final_stage"]) or str(r["final_stage"]).strip() == "" else str(r["final_stage"]).strip(),
+            "shape_type": None if pd.isna(r["final_shape_type"]) or str(r["final_shape_type"]).strip() == "" else str(r["final_shape_type"]).strip(),
             "style_code": style_code,
             "sku": sku,
             "is_peak_week": is_peak_week,
