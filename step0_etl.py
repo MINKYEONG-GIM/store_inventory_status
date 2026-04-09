@@ -126,6 +126,26 @@ def calday_to_year_week(calday_value):
     return f"{int(iso.year)}-{int(iso.week):02d}"
 
 
+def normalize_year_week(yw):
+    """
+    RAW / item_plc 간 주차 키를 동일하게 맞춤 (예: 2026-12, 2026-12.0 -> 2026-12).
+    """
+    if pd.isna(yw) or yw is None:
+        return None
+    s = str(yw).strip().replace(".0", "")
+    if not s:
+        return None
+    if "-" in s:
+        parts = s.split("-", 1)
+        try:
+            y = int(parts[0])
+            w = int(parts[1])
+            return f"{y}-{w:02d}"
+        except (ValueError, IndexError):
+            return s
+    return s
+
+
 def to_int(value, default=0):
     x = pd.to_numeric(value, errors="coerce")
     if pd.isna(x):
@@ -152,6 +172,8 @@ def load_raw_file_df(client) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df = df.dropna(subset=["year_week"])
+    df["year_week"] = df["year_week"].apply(normalize_year_week)
+    df = df.dropna(subset=["year_week"])
     df = df[df["sku"] != ""]
 
     return df
@@ -170,6 +192,9 @@ def load_item_plc_df(client) -> pd.DataFrame:
 
     if "peak_week" in df.columns:
         df["peak_week"] = pd.to_numeric(df["peak_week"], errors="coerce")
+
+    if "year_week" in df.columns:
+        df["year_week"] = df["year_week"].apply(normalize_year_week)
 
     return df
 
@@ -195,8 +220,12 @@ def build_forecast_rows(raw_df: pd.DataFrame, plc_df: pd.DataFrame) -> list:
         })
     )
 
-    # 2) item_code별 PLC
-    plc_specific = plc_df.copy()
+    # 2) item_code별 PLC — (item_code, year_week)당 한 행만 두고 stage 등 조인
+    plc_specific = plc_df[plc_df["item_code"] != "평균"].copy()
+    plc_specific = plc_specific.dropna(subset=["year_week"])
+    if "id" in plc_specific.columns:
+        plc_specific = plc_specific.sort_values("id")
+    plc_specific = plc_specific.drop_duplicates(subset=["item_code", "year_week"], keep="last")
 
     # 3) 평균 PLC
     plc_avg = plc_df[plc_df["item_code"] == "평균"].copy()
