@@ -34,6 +34,7 @@ id,
 item_code,
 item_name,
 year_week,
+week_no,
 month,
 sales,
 last_year_ratio_pct,
@@ -246,7 +247,7 @@ def load_item_plc_df(client) -> pd.DataFrame:
     if "year_week" in df.columns:
         df["year_week"] = df["year_week"].apply(normalize_year_week)
 
-    for col in ["last_year_ratio_pct", "peak_week", "peak_month", "sales"]:
+    for col in ["last_year_ratio_pct", "peak_week", "peak_month", "sales", "week_no"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -254,25 +255,105 @@ def load_item_plc_df(client) -> pd.DataFrame:
     df["year"] = parts.apply(lambda x: x[0])
     df["week"] = parts.apply(lambda x: x[1])
 
+    # item_plc에 week_no가 비어 있으면 year_week에서 week 값으로 보정
+    if "week_no" not in df.columns:
+        df["week_no"] = df["week"]
+    else:
+        df["week_no"] = df["week_no"].fillna(df["week"])
+
     return df
 
 
 def deduplicate_item_plc(plc_df: pd.DataFrame) -> pd.DataFrame:
     """
-    item_code + year_week 기준으로 한 행만 남김.
+    item_code + week_no 기준으로 한 행만 남김.
     마지막 id 기준 keep last
     """
     if plc_df.empty:
         return plc_df
 
     work = plc_df.copy()
-    work = work.dropna(subset=["item_code", "year_week"])
+    work = work.dropna(subset=["item_code", "week_no"])
 
     if "id" in work.columns:
         work = work.sort_values("id")
 
-    work = work.drop_duplicates(subset=["item_code", "year_week"], keep="last")
+    work = work.drop_duplicates(subset=["item_code", "week_no"], keep="last")
     return work
+
+
+def attach_plc_fields_by_itemcode_weekno(base_df: pd.DataFrame, plc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    sku row마다 item_plc 값을 붙인다.
+
+    우선순위
+    1) 같은 item_code + 같은 week_no
+    2) 없으면 item_code='평균' + 같은 week_no
+    """
+    if base_df.empty:
+        return base_df.copy()
+
+    result = base_df.copy()
+
+    if plc_df.empty:
+        result["last_year_ratio_pct"] = None
+        result["shape_type"] = None
+        result["stage"] = None
+        result["peak_week"] = None
+        return result
+
+    plc_use = plc_df.copy()
+    plc_use["item_code"] = plc_use["item_code"].apply(
+        lambda x: str(x).strip() if pd.notna(x) else None
+    )
+    plc_use["week_no"] = pd.to_numeric(plc_use["week_no"], errors="coerce")
+
+    plc_cols = ["item_code", "week_no", "last_year_ratio_pct", "shape_type", "stage", "peak_week"]
+    plc_use = plc_use[[c for c in plc_cols if c in plc_use.columns]].copy()
+
+    specific_plc = plc_use[plc_use["item_code"] != "평균"].copy()
+    avg_plc = plc_use[plc_use["item_code"] == "평균"].copy()
+
+    avg_plc = avg_plc.rename(columns={
+        "last_year_ratio_pct": "avg_last_year_ratio_pct",
+        "shape_type": "avg_shape_type",
+        "stage": "avg_stage",
+        "peak_week": "avg_peak_week",
+    })
+
+    result["item_code"] = result["item_code"].apply(
+        lambda x: str(x).strip() if pd.notna(x) else None
+    )
+    result["week_no"] = pd.to_numeric(result["week_no"], errors="coerce")
+
+    # 1차: item_code + week_no
+    result = result.merge(
+        specific_plc,
+        on=["item_code", "week_no"],
+        how="left"
+    )
+
+    # 2차: 평균 + week_no
+    result = result.merge(
+        avg_plc[[c for c in ["week_no", "avg_last_year_ratio_pct", "avg_shape_type", "avg_stage", "avg_peak_week"] if c in avg_plc.columns]],
+        on="week_no",
+        how="left"
+    )
+
+    # 실제 item_code 매칭이 있으면 그 값 사용, 없으면 평균값 사용
+    if "avg_last_year_ratio_pct" in result.columns:
+        result["last_year_ratio_pct"] = result["last_year_ratio_pct"].combine_first(result["avg_last_year_ratio_pct"])
+    if "avg_shape_type" in result.columns:
+        result["shape_type"] = result["shape_type"].combine_first(result["avg_shape_type"])
+    if "avg_stage" in result.columns:
+        result["stage"] = result["stage"].combine_first(result["avg_stage"])
+    if "avg_peak_week" in result.columns:
+        result["peak_week"] = result["peak_week"].combine_first(result["avg_peak_week"])
+
+    drop_cols = ["avg_last_year_ratio_pct", "avg_shape_type", "avg_stage", "avg_peak_week"]
+    result = result.drop(columns=[c for c in drop_cols if c in result.columns])
+
+    return result
 
 
 def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int, curr_week: int) -> pd.DataFrame:
@@ -288,15 +369,7 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: int
         (work["week"] <= curr_week)
     ].copy()
 
-    plc_join = plc_df[[
-        "item_code", "year_week", "last_year_ratio_pct", "shape_type", "stage", "peak_week"
-    ]].copy()
-
-    merged = work.merge(
-        plc_join,
-        on=["item_code", "year_week"],
-        how="left"
-    )
+    merged = attach_plc_fields_by_itemcode_weekno(work, plc_df)
 
     merged["is_peak_week"] = (
         merged["peak_week"].notna() &
@@ -377,33 +450,34 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
         how="left"
     )
 
-    # item_code별 현재까지 ratio 누적
+    # 현재까지 누적 ratio 계산용: 실제 판매가 있는 주차들에 대해 PLC 붙이기
+    actual_weeks = sku_this_year[sku_this_year["week"] <= curr_week][[
+        "item_code", "week_no"
+    ]].copy()
+    actual_weeks = actual_weeks.drop_duplicates()
+
+    actual_weeks = attach_plc_fields_by_itemcode_weekno(actual_weeks, plc_this_year)
+
     ratio_cum = (
-        plc_this_year[plc_this_year["week"] <= curr_week]
-        .groupby("item_code", as_index=False)
+        actual_weeks.groupby("item_code", as_index=False)
         .agg(ratio_cum=("last_year_ratio_pct", "sum"))
     )
 
-    # 미래 주차 plc
-    future_plc = plc_this_year[plc_this_year["week"] > curr_week].copy()
-    if future_plc.empty:
-        return pd.DataFrame()
-
-    # season total estimate 계산용 merge
     base = actual_summary.merge(ratio_cum, on="item_code", how="left")
 
-    # 미래주차 붙이기
-    merged = base.merge(
-        future_plc[[
-            "item_code", "year_week", "week",
-            "last_year_ratio_pct", "shape_type", "stage", "peak_week"
-        ]],
-        on="item_code",
-        how="inner"
-    )
+    # 미래 주차 생성용
+    future_weeks = pd.DataFrame({
+        "week_no": list(range(curr_week + 1, 53))
+    })
+    future_weeks["year_week"] = future_weeks["week_no"].apply(lambda w: f"{curr_year}-{int(w):02d}")
 
-    if merged.empty:
-        return pd.DataFrame()
+    # sku별 미래 주차 펼치기
+    base["key"] = 1
+    future_weeks["key"] = 1
+    expanded = base.merge(future_weeks, on="key", how="inner").drop(columns=["key"])
+
+    # 미래 주차마다 PLC 붙이기
+    expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_this_year)
 
     def calc_forecast_sale(row):
         actual_sale_cum = pd.to_numeric(row.get("actual_sale_cum"), errors="coerce")
@@ -421,10 +495,10 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
         forecast_sale = season_total * (float(week_ratio) / 100.0)
         return float(round(forecast_sale, 2))
 
-    merged["sale_qty"] = merged.apply(calc_forecast_sale, axis=1)
-    merged["is_peak_week"] = (
-        merged["peak_week"].notna() &
-        (pd.to_numeric(merged["week"], errors="coerce") == pd.to_numeric(merged["peak_week"], errors="coerce"))
+    expanded["sale_qty"] = expanded.apply(calc_forecast_sale, axis=1)
+    expanded["is_peak_week"] = (
+        expanded["peak_week"].notna() &
+        (pd.to_numeric(expanded["week_no"], errors="coerce") == pd.to_numeric(expanded["peak_week"], errors="coerce"))
     )
 
     def calc_loss(row):
@@ -437,10 +511,10 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
         loss_val = max(float(sale_qty) - float(base_stock), 0)
         return int(round(loss_val))
 
-    merged["loss"] = merged.apply(calc_loss, axis=1)
+    expanded["loss"] = expanded.apply(calc_loss, axis=1)
 
     rows = []
-    for _, r in merged.iterrows():
+    for _, r in expanded.iterrows():
         rows.append({
             "year_week": r.get("year_week"),
             "sale_qty": to_float_or_none(r.get("sale_qty")),
@@ -457,7 +531,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, curr_year: i
             "loss": to_int_or_none(r.get("loss")),
             "IPGO_QTY": to_int_or_none(r.get("IPGO_QTY")),
             "shape_type": None if pd.isna(r.get("shape_type")) or str(r.get("shape_type")).strip() == "" else str(r.get("shape_type")).strip(),
-            "week_no": to_int_or_none(r.get("week")),
+            "week_no": to_int_or_none(r.get("week_no")),
         })
 
     return pd.DataFrame(rows)
