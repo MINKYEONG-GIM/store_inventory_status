@@ -226,6 +226,55 @@ def simulate_inventory_runway_weeks(
     return total, rem
 
 
+def _target_week_for_horizon(
+    weekly_list: List[Tuple[int, float]], low_th: float
+) -> Optional[int]:
+    """low_th 주(올림)만큼의 예측 구간에 해당하는 마지막 ISO 주차."""
+    if not weekly_list:
+        return None
+    n = max(1, int(math.ceil(low_th)))
+    idx = min(n, len(weekly_list)) - 1
+    return int(weekly_list[idx][0])
+
+
+def _qty_shortage_through_week(
+    start_stock: float,
+    weekly_list: List[Tuple[int, float]],
+    target_week: int,
+) -> float:
+    """기준 주차까지 주차별 sale_qty로 소진 시 부족분 누적."""
+    needed_qty = 0.0
+    remaining_stock = max(0.0, float(start_stock))
+    for wn, sale in weekly_list:
+        if wn > target_week:
+            break
+        q = max(0.0, float(sale))
+        if remaining_stock >= q:
+            remaining_stock -= q
+        else:
+            needed_qty += q - remaining_stock
+            remaining_stock = 0.0
+    return needed_qty
+
+
+def _qty_surplus_after_week(
+    start_stock: float,
+    weekly_list: List[Tuple[int, float]],
+    target_week: int,
+) -> float:
+    """기준 주차까지 주차별 sale_qty 차감 후 남은 재고."""
+    remaining_stock = max(0.0, float(start_stock))
+    for wn, sale in weekly_list:
+        if wn > target_week:
+            break
+        q = max(0.0, float(sale))
+        remaining_stock -= q
+        if remaining_stock <= 0.0:
+            remaining_stock = 0.0
+            break
+    return remaining_stock
+
+
 def classify_band(inv_w: float, lead_weeks: float, safety_w: float) -> str:
     low = lead_weeks + safety_w
     if math.isinf(inv_w):
@@ -314,23 +363,15 @@ def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]
 
         band = classify_band(inv_w, lead_weeks, safety_w)
 
-        fwd_vals = [q for _wn, q in weekly_list if q > 0]
-        avg_pos = float(pd.Series(fwd_vals).mean()) if fwd_vals else 0.0
-        if avg_pos <= 0 and weekly_list:
-            avg_pos = float(pd.Series([q for _, q in weekly_list]).mean()) or 0.0
-        if avg_pos <= 0 and not weekly_list:
-            aq = agg_sale[sale_c].map(_to_float_qty)
-            avg_pos = float(aq.mean()) if not aq.empty else 0.0
-
-        shortfall_weeks = (
-            max(0.0, low_th - inv_w) if band == "부족 매장" and not math.isinf(inv_w) else 0.0
-        )
-        surplus_weeks = (
-            max(0.0, inv_w - low_th) if band == "여유 매장" and not math.isinf(inv_w) else 0.0
-        )
-
-        est_short = int(round(shortfall_weeks * avg_pos)) if shortfall_weeks > 0 else 0
-        est_surplus = int(round(surplus_weeks * avg_pos)) if surplus_weeks > 0 else 0
+        # SHORTAGE / SURPLUS: sku_weekly_forecast_2 의 주차별 sale_qty 로만 계산 (평균 판매량 미사용)
+        target_week = _target_week_for_horizon(weekly_list, low_th)
+        est_short = 0
+        est_surplus = 0
+        if target_week is not None:
+            if band == "부족 매장" and not math.isinf(inv_w):
+                est_short = int(round(_qty_shortage_through_week(start_stock, weekly_list, target_week)))
+            if band == "여유 매장" and not math.isinf(inv_w):
+                est_surplus = int(round(_qty_surplus_after_week(start_stock, weekly_list, target_week)))
 
         inv_display = 9999.99 if math.isinf(inv_w) else round(float(inv_w), 4)
 
