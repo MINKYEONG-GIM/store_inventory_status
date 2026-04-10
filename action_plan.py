@@ -439,6 +439,7 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
                 "lead_time": float(max(0.0, max_lead_time)),
                 "reorder_needed": bool(reorder_needed),
                 "reorder_urgency": str(reorder_urgency or "").strip() or "불필요",
+                "shortage_start_date": shortage_start_date.date().isoformat(),
                 "order_due_date": order_due_date,
             }
         )
@@ -468,7 +469,7 @@ def load_step2() -> Dict[str, Any]:
     try:
         resp = (
             client.table(step2_table)
-            .select("sku, center_stock_qty, surplus_qty, shortage_qty")
+            .select("sku, shortage_start_date, order_due_date, center_stock_qty, surplus_qty, shortage_qty")
             .limit(10)
             .execute()
         )
