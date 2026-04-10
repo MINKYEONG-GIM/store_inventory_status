@@ -276,6 +276,10 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
             {
                 "style_code": (str(r["style_code"]).strip() or None),
                 "sku": str(r["sku"]).strip(),
+                # 요청 컬럼: sku 기준 합계값들
+                "center_stock_qty": center_stock_qty,
+                "surplus_qty": sum_surplus_qty,
+                "shortage_qty": sum_shortage_qty,
                 "total_shortage_qty": total_shortage_qty,
                 "shortage_store_count": int(r["shortage_store_count"]),
                 "lead_time": float(max_lead_time),
