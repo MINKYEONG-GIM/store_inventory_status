@@ -289,13 +289,13 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
 
     # 부족 시작일(shortage_start_date) 파생
     # - 우선순위: (1) step1에 명시된 shortage_start_date (2) 주차별 stock/sales로 계산 (3) today
-    today = pd.Timestamp.today().date()
-    step1_df["shortage_start_date_parsed"] = pd.to_datetime(step1_df[shortage_start_col], errors="coerce").dt.date
+    today = pd.Timestamp.today().normalize()
+    step1_df["shortage_start_date_parsed"] = pd.to_datetime(step1_df[shortage_start_col], errors="coerce")
 
     computed_shortage_start = pd.DataFrame({"sku_norm": [], "computed_shortage_start_date": []})
     if week_start_col and sales_qty_col and stock_qty_col:
         tmp = step1_df.copy()
-        tmp["week_start_date_parsed"] = pd.to_datetime(tmp[week_start_col], errors="coerce").dt.date
+        tmp["week_start_date_parsed"] = pd.to_datetime(tmp[week_start_col], errors="coerce")
         tmp["sales_qty_num"] = tmp[sales_qty_col].apply(_to_float)
         tmp["stock_qty_num"] = tmp[stock_qty_col].apply(_to_float)
 
@@ -330,12 +330,12 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
 
         def _calc_shortage_start_for_sku(g: pd.DataFrame):
             if g.empty:
-                return None
+                return pd.NaT
             start_stock = float(_to_float(g.iloc[0]["stock_qty"]) + _to_float(g.iloc[0]["center_stock_qty"]))
             balance = start_stock - g["sales_qty"].cumsum()
             neg = balance[balance < 0]
             if neg.empty:
-                return None
+                return pd.NaT
             first_idx = int(neg.index[0])
             return g.loc[first_idx, "week_start_date_parsed"]
 
@@ -346,8 +346,11 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
         )
 
     step1_df = step1_df.merge(computed_shortage_start, how="left", on="sku_norm")
-    step1_df["shortage_start_final"] = step1_df["shortage_start_date_parsed"]
-    step1_df.loc[step1_df["shortage_start_final"].isna(), "shortage_start_final"] = step1_df["computed_shortage_start_date"]
+    step1_df["shortage_start_date_parsed"] = pd.to_datetime(step1_df["shortage_start_date_parsed"], errors="coerce")
+    step1_df["computed_shortage_start_date"] = pd.to_datetime(step1_df["computed_shortage_start_date"], errors="coerce")
+    step1_df["shortage_start_final"] = step1_df["shortage_start_date_parsed"].combine_first(
+        step1_df["computed_shortage_start_date"]
+    )
     step1_df["shortage_start_final"] = step1_df["shortage_start_final"].fillna(today)
 
     step1_agg = (
@@ -390,15 +393,16 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
 
     out: List[Dict[str, Any]] = []
-    today = pd.Timestamp.today().date()
+    today = pd.Timestamp.today().normalize()
 
     for _, r in merged.iterrows():
         sum_shortage_qty = _to_float(r["sum_shortage_qty"])
         sum_surplus_qty = _to_float(r["sum_surplus_qty"])
         center_stock_qty = _to_float(r["center_stock_qty"])
         max_lead_time = _to_float(r["max_lead_time"])
-        shortage_start_date = r.get("shortage_start_date") or today
-        shortage_start_date = pd.to_datetime(shortage_start_date, errors="coerce").date() if shortage_start_date else today
+        shortage_start_date = pd.to_datetime(r.get("shortage_start_date"), errors="coerce")
+        if pd.isna(shortage_start_date):
+            shortage_start_date = today
 
         remain_qty = sum_shortage_qty - sum_surplus_qty - center_stock_qty
         # NOT NULL 컬럼 대응: 음수/None 방지 및 타입 고정
@@ -419,7 +423,7 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
 
         # order_due_date = shortage_start_date - lead_time_days
         lt_days = int(math.ceil(max(0.0, max_lead_time)))
-        order_due_date = (shortage_start_date - pd.Timedelta(days=lt_days)).isoformat()
+        order_due_date = (shortage_start_date - pd.Timedelta(days=lt_days)).date().isoformat()
 
         out.append(
             {
