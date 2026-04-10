@@ -539,17 +539,42 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         (pd.to_numeric(expanded["week_no"], errors="coerce") == pd.to_numeric(expanded["peak_week"], errors="coerce"))
     )
 
-    def calc_loss(row):
-        sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
-        base_stock = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
+    # 예측 주차: week_no 오름차순으로 재고 차감. 부족 시 재고 0, 못 판 만큼 loss
+    expanded = expanded.sort_values(
+        ["item_code", "style_code", "sku", "plant", "week_no"],
+        na_position="last"
+    ).reset_index(drop=True)
 
-        if pd.isna(sale_qty) or pd.isna(base_stock):
-            return None
+    n = len(expanded)
+    new_base = [None] * n
+    new_loss = [None] * n
+    grp_cols = ["item_code", "style_code", "sku", "plant"]
 
-        loss_val = max(float(sale_qty) - float(base_stock), 0)
-        return int(round(loss_val))
+    for _, g in expanded.groupby(grp_cols, sort=False):
+        g_sorted = g.sort_values("week_no", na_position="last")
+        init = pd.to_numeric(g_sorted["BASE_STOCK_QTY"].iloc[0], errors="coerce")
+        running = 0.0 if pd.isna(init) else float(init)
 
-    expanded["loss"] = expanded.apply(calc_loss, axis=1)
+        for i, row in g_sorted.iterrows():
+            sale = pd.to_numeric(row["sale_qty"], errors="coerce")
+            if pd.isna(sale):
+                new_base[i] = to_int_or_none(running)
+                new_loss[i] = None
+                continue
+
+            sale_i = int(round(float(sale)))
+            new_s = running - sale_i
+            if new_s < 0:
+                new_base[i] = 0
+                new_loss[i] = int(round(-new_s))
+                running = 0.0
+            else:
+                new_base[i] = int(round(new_s))
+                new_loss[i] = 0
+                running = new_s
+
+    expanded["BASE_STOCK_QTY"] = new_base
+    expanded["loss"] = new_loss
 
     rows = []
     for _, r in expanded.iterrows():
