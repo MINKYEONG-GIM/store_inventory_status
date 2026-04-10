@@ -5,16 +5,27 @@ import psycopg2
 import streamlit as st
 
 
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if value is None or value == "":
+        raise RuntimeError(f"환경변수 {name} 가(이) 비어있습니다.")
+    return value
+
+
 # -----------------------------
 # DB 연결
 # -----------------------------
 def get_conn():
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return psycopg2.connect(database_url)
+
     return psycopg2.connect(
-        host=os.getenv("PGHOST"),
+        host=_require_env("PGHOST"),
         port=os.getenv("PGPORT", "5432"),
-        user=os.getenv("PGUSER"),
-        password=os.getenv("PGPASSWORD"),
-        dbname=os.getenv("PGDATABASE"),
+        user=_require_env("PGUSER"),
+        password=_require_env("PGPASSWORD"),
+        dbname=_require_env("PGDATABASE"),
         sslmode=os.getenv("PGSSLMODE", "require"),
     )
 
@@ -60,11 +71,10 @@ final_calc AS (
         s.style_code,
         s.sku,
 
-        -- 매장 부족합 - 매장 여유합 - 센터재고합
-        ROUND(
-            s.sum_shortage_qty
-            - s.sum_surplus_qty
-            - COALESCE(c.center_stock_qty, 0)
+        -- total_shortage_qty = (매장 부족합 - 매장 여유합) - 센터재고합  (SKU 단위)
+        CEIL(
+            (s.sum_shortage_qty - s.sum_surplus_qty)::numeric
+            - COALESCE(c.center_stock_qty, 0)::numeric
         )::integer AS total_shortage_qty,
 
         s.shortage_store_count,
@@ -120,27 +130,19 @@ ORDER BY sku;
 """
 
 
-# -----------------------------
-# 실행 함수
-# -----------------------------
 def load_step2():
     conn = None
     cur = None
-
     try:
         conn = get_conn()
         conn.autocommit = False
         cur = conn.cursor()
-
         cur.execute(LOAD_SQL)
-
         conn.commit()
-
     except Exception:
         if conn:
             conn.rollback()
         raise
-
     finally:
         if cur:
             cur.close()
@@ -148,13 +150,9 @@ def load_step2():
             conn.close()
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
 def main():
     st.set_page_config(page_title="step2 loader", layout="centered")
 
-    # 화면 요소 최대한 숨김
     st.markdown(
         """
         <style>
@@ -171,16 +169,16 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # 버튼 하나만 노출
     if st.button("데이터 쌓기", use_container_width=True):
         try:
             with st.spinner("적재 중..."):
                 load_step2()
             st.success("완료")
-        except Exception as e:
+        except Exception:
             st.error("실패")
             st.code(traceback.format_exc())
 
 
 if __name__ == "__main__":
     main()
+
