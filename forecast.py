@@ -405,7 +405,7 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: i
     for _, r in merged.iterrows():
         rows.append({
             "year_week": r.get("year_week"),
-            "sale_qty": to_float_or_none(r.get("SALE_QTY")),
+            "sale_qty": to_int_or_none(r.get("SALE_QTY")),
             "stage": None if pd.isna(r.get("stage")) or str(r.get("stage")).strip() == "" else str(r.get("stage")).strip(),
             "style_code": None if pd.isna(r.get("style_code")) else str(r.get("style_code")).strip(),
             "sku": None if pd.isna(r.get("sku")) else str(r.get("sku")).strip(),
@@ -530,7 +530,8 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             return None
 
         season_total = float(actual_sale_cum) / (float(ratio_cum) / 100.0)
-        return float(round(season_total * (float(week_ratio) / 100.0), 2))
+        raw = season_total * (float(week_ratio) / 100.0)
+        return int(round(raw))
 
     expanded["sale_qty"] = expanded.apply(calc_forecast_sale, axis=1)
     expanded["is_peak_week"] = (
@@ -554,7 +555,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
     for _, r in expanded.iterrows():
         rows.append({
             "year_week": r.get("year_week"),
-            "sale_qty": to_float_or_none(r.get("sale_qty")),
+            "sale_qty": to_int_or_none(r.get("sale_qty")),
             "stage": None if pd.isna(r.get("stage")) or str(r.get("stage")).strip() == "" else str(r.get("stage")).strip(),
             "style_code": None if pd.isna(r.get("style_code")) else str(r.get("style_code")).strip(),
             "sku": None if pd.isna(r.get("sku")) else str(r.get("sku")).strip(),
