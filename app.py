@@ -1,14 +1,11 @@
 """
-Supabase 저장 결과 조회기.
-
-- public.store_inventory_status_step1 : 배치/외부 파이프라인이 채운 매장 재고 상태(1단계)
-- public.sku_weekly_forecast_2       : 주차별 예측·실적 스냅샷(참고용 조회)
-
-이 스크립트는 PLC/RAW/reorder를 읽어 새로 예측을 계산하지 않습니다.
+sku_weekly_forecast_2 전체를 읽어 매장(SKU×plant)별 지표를 계산한 뒤
+store_inventory_status_step1 에 적재합니다.
 """
+import math
 import os
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -18,13 +15,15 @@ try:
 except ImportError:
     _create_supabase_client = None
 
-st.set_page_config(page_title="재고 상태 조회", layout="wide")
+st.set_page_config(page_title="데이터 쌓기", layout="centered")
+
+DEFAULT_LEAD_TIME_DAYS = 21
+DEFAULT_INVENTORY_SAFETY_WEEKS = 2.0
 
 
 def show_detailed_exception(err: BaseException, title: str = "오류가 발생했습니다") -> None:
     st.error(title)
     st.markdown(f"**예외 종류:** `{type(err).__name__}`")
-    st.caption("메시지(내용에 기호가 있어도 그대로 표시)")
     st.code(str(err) if str(err) else "(메시지 없음)", language="text")
     tb = traceback.format_exc()
     with st.expander("전체 스택 트레이스", expanded=True):
@@ -64,11 +63,6 @@ def get_supabase_client():
 
 
 def get_store_inventory_status_step1_table_name() -> str:
-    """
-    public.store_inventory_status_step1
-    secrets [supabase] store_inventory_status_step1_table
-    환경변수 SUPABASE_STORE_INVENTORY_STATUS_STEP1_TABLE
-    """
     try:
         if hasattr(st, "secrets") and "supabase" in st.secrets:
             v = st.secrets["supabase"].get("store_inventory_status_step1_table")
@@ -83,11 +77,6 @@ def get_store_inventory_status_step1_table_name() -> str:
 
 
 def get_sku_weekly_forecast_table_name() -> str:
-    """
-    public.sku_weekly_forecast_2
-    secrets [supabase] sku_weekly_forecast_table
-    환경변수 SUPABASE_SKU_WEEKLY_FORECAST_TABLE
-    """
     try:
         if hasattr(st, "secrets") and "supabase" in st.secrets:
             v = st.secrets["supabase"].get("sku_weekly_forecast_table")
@@ -96,6 +85,42 @@ def get_sku_weekly_forecast_table_name() -> str:
     except Exception:
         pass
     return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_TABLE") or "sku_weekly_forecast_2").strip()
+
+
+def get_inventory_safety_weeks() -> float:
+    safety = DEFAULT_INVENTORY_SAFETY_WEEKS
+    try:
+        if hasattr(st, "secrets") and "inventory_policy" in st.secrets:
+            sec = dict(st.secrets["inventory_policy"])
+            if sec.get("safety_weeks") is not None and str(sec.get("safety_weeks")).strip() != "":
+                safety = float(sec["safety_weeks"])
+    except Exception:
+        pass
+    env_s = (os.getenv("INVENTORY_SAFETY_WEEKS") or "").strip()
+    if env_s:
+        try:
+            safety = float(env_s)
+        except ValueError:
+            pass
+    return max(0.0, safety)
+
+
+def get_lead_time_days() -> int:
+    d = DEFAULT_LEAD_TIME_DAYS
+    try:
+        if hasattr(st, "secrets") and "inventory_policy" in st.secrets:
+            sec = dict(st.secrets["inventory_policy"])
+            if sec.get("lead_time_days") is not None and str(sec.get("lead_time_days")).strip() != "":
+                d = int(float(sec["lead_time_days"]))
+    except Exception:
+        pass
+    env_d = (os.getenv("LEAD_TIME_DAYS") or "").strip()
+    if env_d:
+        try:
+            d = int(float(env_d))
+        except ValueError:
+            pass
+    return max(1, d)
 
 
 def fetch_supabase_table_all_rows(
@@ -131,151 +156,257 @@ def fetch_supabase_table_all_rows(
     return rows
 
 
-def fetch_step1_with_optional_filters(
-    client,
-    *,
-    sku: Optional[str] = None,
-    plant: Optional[str] = None,
-    style_code: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    store_inventory_status_step1 조회.
-    필터가 있으면 PostgREST eq 체인(AND), 없으면 전체 순회 로드.
-    """
-    tbl = get_store_inventory_status_step1_table_name()
-    sku_s = (sku or "").strip()
-    plant_s = (plant or "").strip()
-    style_s = (style_code or "").strip()
-
-    if not sku_s and not plant_s and not style_s:
-        records = fetch_supabase_table_all_rows(client, tbl)
-        return pd.DataFrame(records) if records else pd.DataFrame()
-
-    q = client.table(tbl).select("*")
-    if sku_s:
-        q = q.eq("sku", sku_s)
-    if plant_s:
-        q = q.eq("plant", plant_s)
-    if style_s:
-        q = q.eq("style_code", style_s)
-
-    try:
-        resp = q.execute()
-        data = resp.data if resp.data else []
-        return pd.DataFrame(data) if data else pd.DataFrame()
-    except Exception:
-        records = fetch_supabase_table_all_rows(client, tbl)
-        df = pd.DataFrame(records) if records else pd.DataFrame()
-        if df.empty:
-            return df
-        if sku_s:
-            df = df[df.get("sku", "").astype(str).str.strip() == sku_s]
-        if plant_s:
-            df = df[df.get("plant", "").astype(str).str.strip() == plant_s]
-        if style_s:
-            df = df[df.get("style_code", "").astype(str).str.strip() == style_s]
-        return df
+def _to_float_qty(v: Any) -> float:
+    x = pd.to_numeric(v, errors="coerce")
+    if pd.isna(x):
+        return 0.0
+    return float(x)
 
 
-def fetch_weekly_forecast_rows_by_sku(client, sku: str) -> List[Dict[str, Any]]:
-    """sku_weekly_forecast_2에서 단일 SKU 전 행."""
-    sku_s = str(sku).strip()
-    if not sku_s:
+def _col(df: pd.DataFrame, *names: str) -> Optional[str]:
+    for n in names:
+        if n in df.columns:
+            return n
+    lower = {str(c).lower(): c for c in df.columns}
+    for n in names:
+        if n.lower() in lower:
+            return lower[n.lower()]
+    return None
+
+
+def pick_base_stock_for_iso_week(df_plant: pd.DataFrame, cw: int) -> float:
+    wcol = _col(df_plant, "week_no")
+    bcol = _col(df_plant, "BASE_STOCK_QTY", "base_stock_qty")
+    if wcol is None or bcol is None:
+        return 0.0
+    d = df_plant.copy()
+    d["_wn"] = pd.to_numeric(d[wcol], errors="coerce")
+    d = d.dropna(subset=["_wn"])
+    if d.empty:
+        return 0.0
+    d["_wn"] = d["_wn"].astype(int)
+    exact = d[d["_wn"] == int(cw)]
+    if not exact.empty:
+        return max(0.0, _to_float_qty(exact.iloc[0][bcol]))
+    le = d[d["_wn"] <= int(cw)]
+    if not le.empty:
+        le = le.sort_values("_wn")
+        return max(0.0, _to_float_qty(le.iloc[-1][bcol]))
+    d = d.sort_values("_wn")
+    return max(0.0, _to_float_qty(d.iloc[0][bcol]))
+
+
+def simulate_inventory_runway_weeks(
+    start_stock: float,
+    weekly_sales: List[Tuple[int, float]],
+) -> Tuple[float, float]:
+    rem = max(0.0, float(start_stock))
+    weeks_cover = 0.0
+    last_pos_q = 0.0
+    for _wn, q_raw in weekly_sales:
+        q = max(0.0, float(q_raw))
+        if q > 0:
+            last_pos_q = q
+        if rem <= 1e-12:
+            break
+        if q <= 1e-12:
+            weeks_cover += 1.0
+            continue
+        if rem <= q:
+            weeks_cover += rem / q
+            rem = 0.0
+            break
+        rem -= q
+        weeks_cover += 1.0
+    extra_weeks_from_tail = 0.0
+    if rem > 1e-6 and last_pos_q > 1e-12:
+        extra_weeks_from_tail = rem / last_pos_q
+        rem = 0.0
+    total = weeks_cover + extra_weeks_from_tail
+    return total, rem
+
+
+def classify_band(inv_w: float, lead_weeks: float, safety_w: float) -> str:
+    low = lead_weeks + safety_w
+    if math.isinf(inv_w):
+        return "여유 매장"
+    if inv_w <= low + 1e-9:
+        return "부족 매장"
+    return "여유 매장"
+
+
+def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """sku_weekly_forecast_2 DataFrame → store_inventory_status_step1 적재용 레코드."""
+    if df is None or df.empty:
         return []
-    tbl_name = get_sku_weekly_forecast_table_name()
-    rows: List[Dict[str, Any]] = []
-    off = 0
-    batch_size = 1000
-    while True:
-        try:
-            resp = (
-                client.table(tbl_name)
-                .select("*")
-                .eq("sku", sku_s)
-                .limit(batch_size)
-                .offset(off)
-                .execute()
-            )
-        except Exception:
-            resp = (
-                client.table(tbl_name)
-                .select("*")
-                .eq("sku", sku_s)
-                .range(off, off + batch_size - 1)
-                .execute()
-            )
-        chunk = resp.data if resp.data else []
-        if not chunk:
-            break
-        rows.extend(chunk)
-        if len(chunk) < batch_size:
-            break
-        off += batch_size
-    return rows
+
+    sale_c = _col(df, "sale_qty")
+    plant_c = _col(df, "plant")
+    sku_c = _col(df, "sku")
+    wn_c = _col(df, "week_no")
+    style_c = _col(df, "style_code")
+
+    if not all([sale_c, plant_c, sku_c, wn_c]):
+        raise ValueError(
+            f"sku_weekly_forecast_2에 필요한 컬럼이 없습니다. "
+            f"있는 컬럼: {list(df.columns)}"
+        )
+
+    lead_days = get_lead_time_days()
+    lead_weeks = max(0.0, float(lead_days) / 7.0)
+    safety_w = get_inventory_safety_weeks()
+    low_th = lead_weeks + safety_w
+
+    cw = int(pd.Timestamp.today().isocalendar().week)
+
+    df = df.copy()
+    df["_sku"] = df[sku_c].astype(str).str.strip()
+    df["_plant"] = df[plant_c].fillna("").astype(str).str.strip().replace("", "전체")
+
+    out: List[Dict[str, Any]] = []
+
+    for (_sku, _plant), g in df.groupby(["_sku", "_plant"], dropna=False):
+        sku_s = str(_sku).strip()
+        plant_s = str(_plant).strip() if _plant is not None else "전체"
+        if not sku_s:
+            continue
+
+        g2 = g.copy()
+        g2["_wn"] = pd.to_numeric(g2[wn_c], errors="coerce")
+        g2 = g2.dropna(subset=["_wn"])
+        if g2.empty:
+            continue
+        g2["_wn"] = g2["_wn"].astype(int)
+        g2 = g2.sort_values("_wn", kind="mergesort")
+        agg_sale = g2.groupby("_wn", as_index=False)[sale_c].sum()
+
+        weekly_list: List[Tuple[int, float]] = []
+        for _, r in agg_sale.iterrows():
+            wn = int(r["_wn"])
+            if wn < cw:
+                continue
+            weekly_list.append((wn, _to_float_qty(r[sale_c])))
+
+        g_for_base = g2.copy()
+        g_for_base["week_no"] = g_for_base["_wn"]
+        if wn_c in g_for_base.columns and wn_c != "week_no":
+            g_for_base = g_for_base.drop(columns=[wn_c])
+        start_stock = pick_base_stock_for_iso_week(g_for_base, cw)
+
+        sty = ""
+        if style_c is not None:
+            try:
+                sty = str(g2.iloc[0][style_c]).strip()
+            except Exception:
+                sty = ""
+
+        if not weekly_list:
+            all_q = agg_sale[sale_c].map(_to_float_qty)
+            avg_q = float(all_q.mean()) if not all_q.empty else 0.0
+            if avg_q > 1e-12:
+                inv_w = float(start_stock) / avg_q
+                tail_rem = 0.0
+            else:
+                inv_w = float("inf") if start_stock > 1e-6 else 0.0
+                tail_rem = max(0.0, float(start_stock))
+        else:
+            inv_w, tail_rem = simulate_inventory_runway_weeks(start_stock, weekly_list)
+
+        band = classify_band(inv_w, lead_weeks, safety_w)
+
+        fwd_vals = [q for _wn, q in weekly_list if q > 0]
+        avg_pos = float(pd.Series(fwd_vals).mean()) if fwd_vals else 0.0
+        if avg_pos <= 0 and weekly_list:
+            avg_pos = float(pd.Series([q for _, q in weekly_list]).mean()) or 0.0
+        if avg_pos <= 0 and not weekly_list:
+            aq = agg_sale[sale_c].map(_to_float_qty)
+            avg_pos = float(aq.mean()) if not aq.empty else 0.0
+
+        shortfall_weeks = (
+            max(0.0, low_th - inv_w) if band == "부족 매장" and not math.isinf(inv_w) else 0.0
+        )
+        surplus_weeks = (
+            max(0.0, inv_w - low_th) if band == "여유 매장" and not math.isinf(inv_w) else 0.0
+        )
+
+        est_short = int(round(shortfall_weeks * avg_pos)) if shortfall_weeks > 0 else 0
+        est_surplus = int(round(surplus_weeks * avg_pos)) if surplus_weeks > 0 else 0
+
+        inv_display = 9999.99 if math.isinf(inv_w) else round(float(inv_w), 4)
+
+        out.append(
+            {
+                "style_code": sty or None,
+                "sku": sku_s,
+                "plant": plant_s,
+                "store_classification": band,
+                "lead_time": float(lead_days),
+                "current_qty": int(round(start_stock)),
+                "stock_weeks": float(inv_display),
+                "shortage_qty": est_short if est_short > 0 else None,
+                "surplus_qty": est_surplus if est_surplus > 0 else None,
+            }
+        )
+
+    return out
+
+
+def clear_step1_table(client) -> None:
+    tbl = get_store_inventory_status_step1_table_name()
+    sentinel = "\uffff\uffff__never_match_sku__\uffff\uffff"
+    client.table(tbl).delete().neq("sku", sentinel).execute()
+
+
+def bulk_insert_step1(client, rows: List[Dict[str, Any]], batch_size: int = 200) -> int:
+    if not rows:
+        return 0
+    tbl = client.table(get_store_inventory_status_step1_table_name())
+    n = 0
+    for i in range(0, len(rows), batch_size):
+        chunk = rows[i : i + batch_size]
+        tbl.insert(chunk).execute()
+        n += len(chunk)
+    return n
+
+
+def run_stack_data(client) -> Dict[str, Any]:
+    wf_tbl = get_sku_weekly_forecast_table_name()
+    raw = fetch_supabase_table_all_rows(client, wf_tbl)
+    if not raw:
+        return {"forecast_rows": 0, "step1_rows": 0, "message": "sku_weekly_forecast_2 가 비어 있습니다."}
+
+    df = pd.DataFrame(raw)
+    step1_rows = compute_step1_rows_from_forecast_df(df)
+    clear_step1_table(client)
+    inserted = bulk_insert_step1(client, step1_rows)
+    return {
+        "forecast_rows": len(raw),
+        "step1_rows": inserted,
+        "groups": len(step1_rows),
+    }
 
 
 def main() -> None:
-    st.title("매장 재고 상태 · 주차별 예측 (조회 전용)")
-    st.caption(
-        "예측을 새로 계산하지 않습니다. "
-        f"`{get_store_inventory_status_step1_table_name()}` 는 배치가 채운 결과를, "
-        f"`{get_sku_weekly_forecast_table_name()}` 는 저장된 주차 스냅샷을 봅니다."
-    )
-
-    sb = get_supabase_client()
-    if sb is None:
-        st.error("Supabase 연결 불가: secrets [supabase] url·key 또는 환경변수를 설정하세요.")
-        return
-
-    st.subheader("1) store_inventory_status_step1")
-    st.caption(
-        "컬럼 예: style_code, sku, plant, store_classification, lead_time, "
-        "current_qty, stock_weeks, shortage_qty, surplus_qty"
-    )
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        f_sku = st.text_input("SKU 필터 (비우면 전체)", key="s1_sku")
-    with c2:
-        f_plant = st.text_input("plant 필터", key="s1_plant")
-    with c3:
-        f_style = st.text_input("style_code 필터", key="s1_style")
-
-    if st.button("step1 테이블 조회", type="primary", key="btn_step1"):
-        try:
-            df = fetch_step1_with_optional_filters(
-                sb,
-                sku=f_sku or None,
-                plant=f_plant or None,
-                style_code=f_style or None,
-            )
-            st.success(f"{len(df):,}행")
-            if not df.empty:
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("조건에 맞는 행이 없습니다.")
-        except Exception as e:
-            show_detailed_exception(e, title="step1 조회 실패")
-
-    st.divider()
-    st.subheader("2) sku_weekly_forecast_2 (SKU별)")
-    st.caption(
-        "컬럼 예: year_week, sale_qty, stage, style_code, sku, plant, "
-        "BASE_STOCK_QTY, IPGO_QTY, shape_type, week_no …"
-    )
-    wf_sku = st.text_input("SKU (MATERIAL)", key="wf_sku", placeholder="필수")
-    if st.button("주차별 예측 테이블 조회", type="secondary", key="btn_wf"):
-        if not str(wf_sku).strip():
-            st.warning("SKU를 입력하세요.")
-        else:
+    if st.button("데이터 쌓기", type="primary"):
+        sb = get_supabase_client()
+        if sb is None:
+            st.error("Supabase 연결 불가. secrets [supabase] url·service_role_key 를 설정하세요.")
+            return
+        with st.spinner(
+            f"{get_sku_weekly_forecast_table_name()} 전체 로드 후 "
+            f"{get_store_inventory_status_step1_table_name()} 에 적재 중…"
+        ):
             try:
-                rows = fetch_weekly_forecast_rows_by_sku(sb, str(wf_sku).strip())
-                st.success(f"{len(rows):,}행")
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                else:
-                    st.info("해당 SKU 행이 없습니다.")
+                r = run_stack_data(sb)
+                st.success(
+                    f"완료: 예측 테이블 {r['forecast_rows']:,}행 기준 → "
+                    f"매장 조합 {r.get('groups', 0):,}건 → "
+                    f"{get_store_inventory_status_step1_table_name()} {r['step1_rows']:,}행 저장."
+                )
+                if r.get("message"):
+                    st.info(r["message"])
             except Exception as e:
-                show_detailed_exception(e, title="sku_weekly_forecast_2 조회 실패")
+                show_detailed_exception(e, title="데이터 쌓기 실패")
 
 
 if __name__ == "__main__":
