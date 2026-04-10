@@ -21,8 +21,6 @@ SALE_QTY,
 style_code,
 sku,
 plant,
-sku_name,
-store_name,
 BASE_STOCK_QTY,
 IPGO_QTY,
 week_no,
@@ -211,7 +209,7 @@ def load_sku_weekly_forecast_df(client) -> pd.DataFrame:
     if df.empty:
         return df
 
-    for col in ["year_week", "style_code", "sku", "plant", "sku_name", "store_name", "item_code"]:
+    for col in ["year_week", "style_code", "sku", "plant", "item_code"]:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else None)
 
