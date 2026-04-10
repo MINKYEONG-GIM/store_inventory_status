@@ -209,6 +209,56 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     shortage_col = _first_existing_col(step1_df, ["shortage_qty", "shortage", "short_qty", "SHORTAGE_QTY"])
     surplus_col = _first_existing_col(step1_df, ["surplus_qty", "surplus", "surp_qty", "SURPLUS_QTY"])
     lead_time_col = _first_existing_col(step1_df, ["lead_time", "leadtime", "lt", "LEAD_TIME"])
+    # shortage_start_date 계산(또는 사용)용 후보 컬럼들
+    shortage_start_col = _first_existing_col(
+        step1_df,
+        [
+            "shortage_start_date",
+            "shortage_start",
+            "shortage_start_dt",
+            "부족시작일",
+            "부족_시작일",
+            "부족발생일",
+            "부족_발생일",
+        ],
+    )
+    week_start_col = _first_existing_col(
+        step1_df,
+        [
+            "week_start",
+            "week_start_date",
+            "week_start_dt",
+            "sales_week_start",
+            "주차시작일",
+            "주차_시작일",
+            "판매주차시작일",
+            "판매_주차_시작일",
+        ],
+    )
+    sales_qty_col = _first_existing_col(
+        step1_df,
+        [
+            "sales_qty",
+            "sale_qty",
+            "qty_sales",
+            "SALES_QTY",
+            "판매수량",
+            "판매_수량",
+        ],
+    )
+    stock_qty_col = _first_existing_col(
+        step1_df,
+        [
+            "stock_qty",
+            "store_stock_qty",
+            "onhand_qty",
+            "on_hand_qty",
+            "STOCK_QTY",
+            "재고",
+            "재고수량",
+            "재고_수량",
+        ],
+    )
 
     if not sku_col:
         sku_col = "sku"
@@ -225,6 +275,9 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     if not lead_time_col:
         lead_time_col = "lead_time"
         step1_df[lead_time_col] = None
+    if not shortage_start_col:
+        shortage_start_col = "shortage_start_date"
+        step1_df[shortage_start_col] = None
 
     step1_df["sku_norm"] = step1_df[sku_col].fillna("").astype(str).str.strip()
     step1_df = step1_df[step1_df["sku_norm"] != ""].copy()
@@ -234,6 +287,69 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     step1_df["surplus_qty_num"] = step1_df[surplus_col].apply(_to_float)
     step1_df["lead_time_num"] = step1_df[lead_time_col].apply(_to_float)
 
+    # 부족 시작일(shortage_start_date) 파생
+    # - 우선순위: (1) step1에 명시된 shortage_start_date (2) 주차별 stock/sales로 계산 (3) today
+    today = pd.Timestamp.today().date()
+    step1_df["shortage_start_date_parsed"] = pd.to_datetime(step1_df[shortage_start_col], errors="coerce").dt.date
+
+    computed_shortage_start = pd.DataFrame({"sku_norm": [], "computed_shortage_start_date": []})
+    if week_start_col and sales_qty_col and stock_qty_col:
+        tmp = step1_df.copy()
+        tmp["week_start_date_parsed"] = pd.to_datetime(tmp[week_start_col], errors="coerce").dt.date
+        tmp["sales_qty_num"] = tmp[sales_qty_col].apply(_to_float)
+        tmp["stock_qty_num"] = tmp[stock_qty_col].apply(_to_float)
+
+        wk = (
+            tmp.dropna(subset=["week_start_date_parsed"])
+            .groupby(["sku_norm", "week_start_date_parsed"], as_index=False)
+            .agg(stock_qty=("stock_qty_num", "sum"), sales_qty=("sales_qty_num", "sum"))
+        )
+
+        # center_stock는 SKU별 상수로 시작재고에 포함(주차별 동일 가정)
+        if center_df.empty:
+            center_by_sku = pd.DataFrame({"sku_norm": [], "center_stock_qty": []})
+        else:
+            center_sku_col2 = _first_existing_col(center_df, ["sku", "SKU"])
+            center_stock_col2 = _first_existing_col(center_df, ["stock_qty", "qty", "stock", "STOCK_QTY"])
+            if not center_sku_col2:
+                center_sku_col2 = "sku"
+                center_df[center_sku_col2] = None
+            if not center_stock_col2:
+                center_stock_col2 = "stock_qty"
+                center_df[center_stock_col2] = 0
+
+            ctmp = center_df.copy()
+            ctmp["sku_norm"] = ctmp[center_sku_col2].fillna("").astype(str).str.strip()
+            ctmp = ctmp[ctmp["sku_norm"] != ""].copy()
+            ctmp["center_stock_qty_num"] = ctmp[center_stock_col2].apply(_to_float)
+            center_by_sku = ctmp.groupby("sku_norm", as_index=False).agg(center_stock_qty=("center_stock_qty_num", "sum"))
+
+        wk = wk.merge(center_by_sku, how="left", on="sku_norm")
+        wk["center_stock_qty"] = wk["center_stock_qty"].fillna(0.0)
+        wk = wk.sort_values(["sku_norm", "week_start_date_parsed"]).reset_index(drop=True)
+
+        def _calc_shortage_start_for_sku(g: pd.DataFrame):
+            if g.empty:
+                return None
+            start_stock = float(_to_float(g.iloc[0]["stock_qty"]) + _to_float(g.iloc[0]["center_stock_qty"]))
+            balance = start_stock - g["sales_qty"].cumsum()
+            neg = balance[balance < 0]
+            if neg.empty:
+                return None
+            first_idx = int(neg.index[0])
+            return g.loc[first_idx, "week_start_date_parsed"]
+
+        computed_shortage_start = (
+            wk.groupby("sku_norm", as_index=False)
+            .apply(lambda g: pd.Series({"computed_shortage_start_date": _calc_shortage_start_for_sku(g)}))
+            .reset_index(drop=True)
+        )
+
+    step1_df = step1_df.merge(computed_shortage_start, how="left", on="sku_norm")
+    step1_df["shortage_start_final"] = step1_df["shortage_start_date_parsed"]
+    step1_df.loc[step1_df["shortage_start_final"].isna(), "shortage_start_final"] = step1_df["computed_shortage_start_date"]
+    step1_df["shortage_start_final"] = step1_df["shortage_start_final"].fillna(today)
+
     step1_agg = (
         step1_df.groupby("sku_norm", as_index=False)
         .agg(
@@ -242,6 +358,7 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
             sum_surplus_qty=("surplus_qty_num", "sum"),
             shortage_store_count=("shortage_qty_num", lambda s: int((s > 0).sum())),
             max_lead_time=("lead_time_num", "max"),
+            shortage_start_date=("shortage_start_final", "min"),
         )
     )
     step1_agg = step1_agg.rename(columns={"sku_norm": "sku"})
@@ -273,7 +390,6 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
 
     out: List[Dict[str, Any]] = []
-
     today = pd.Timestamp.today().date()
 
     for _, r in merged.iterrows():
@@ -281,9 +397,12 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
         sum_surplus_qty = _to_float(r["sum_surplus_qty"])
         center_stock_qty = _to_float(r["center_stock_qty"])
         max_lead_time = _to_float(r["max_lead_time"])
+        shortage_start_date = r.get("shortage_start_date") or today
+        shortage_start_date = pd.to_datetime(shortage_start_date, errors="coerce").date() if shortage_start_date else today
 
         remain_qty = sum_shortage_qty - sum_surplus_qty - center_stock_qty
-        total_shortage_qty = int(math.ceil(remain_qty))
+        # NOT NULL 컬럼 대응: 음수/None 방지 및 타입 고정
+        total_shortage_qty = max(0, int(math.ceil(remain_qty)))
 
         reorder_needed = remain_qty > 0
 
@@ -291,30 +410,31 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
             reorder_urgency = "불필요"
         elif remain_qty <= 0:
             reorder_urgency = "센터출고"
-        elif max_lead_time <= 7:
+        elif max_lead_time > 14:
             reorder_urgency = "긴급"
-        elif max_lead_time <= 14:
+        elif max_lead_time > 7:
             reorder_urgency = "주의"
         else:
             reorder_urgency = "일반"
 
-        order_due_date = None
-        if reorder_needed:
-            order_due_date = (today + pd.Timedelta(days=int(math.ceil(max_lead_time)))).isoformat()
+        # order_due_date = shortage_start_date - lead_time_days
+        lt_days = int(math.ceil(max(0.0, max_lead_time)))
+        order_due_date = (shortage_start_date - pd.Timedelta(days=lt_days)).isoformat()
 
         out.append(
             {
-                "style_code": (str(r["style_code"]).strip() or None),
-                "sku": str(r["sku"]).strip(),
+                # NOT NULL 컬럼 대응: 빈 값은 ""로 저장
+                "style_code": (str(r["style_code"]).strip() if str(r["style_code"]).strip() else ""),
+                "sku": str(r["sku"]).strip() or "",
                 # 요청 컬럼: sku 기준 합계값들
-                "center_stock_qty": center_stock_qty,
-                "surplus_qty": sum_surplus_qty,
-                "shortage_qty": sum_shortage_qty,
-                "total_shortage_qty": total_shortage_qty,
+                "center_stock_qty": float(center_stock_qty),
+                "surplus_qty": float(sum_surplus_qty),
+                "shortage_qty": float(sum_shortage_qty),
+                "total_shortage_qty": int(total_shortage_qty),
                 "shortage_store_count": int(r["shortage_store_count"]),
-                "lead_time": float(max_lead_time),
+                "lead_time": float(max(0.0, max_lead_time)),
                 "reorder_needed": bool(reorder_needed),
-                "reorder_urgency": reorder_urgency,
+                "reorder_urgency": str(reorder_urgency or "").strip() or "불필요",
                 "order_due_date": order_due_date,
             }
         )
