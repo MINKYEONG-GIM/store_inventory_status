@@ -189,104 +189,90 @@ def build_weekly_stock_rows(
     forecast_df = pd.DataFrame(forecast_rows)
     center_df = pd.DataFrame(center_rows) if center_rows else pd.DataFrame()
 
-    # 필수 컬럼 보정
-    required_forecast_cols = ["year_week", "style_code", "sku", "sale_qty", "BASE_STOCK_QTY"]
-    for col in required_forecast_cols:
+    # forecast 필수 컬럼 보정
+    forecast_required_cols = [
+        "year_week", "sku", "sale_qty", "BASE_STOCK_QTY", "IPGO_QTY", "loss"
+    ]
+    for col in forecast_required_cols:
         if col not in forecast_df.columns:
             forecast_df[col] = None
 
-    forecast_df["sku_norm"] = forecast_df["sku"].fillna("").astype(str).str.strip()
-    forecast_df["style_code_norm"] = forecast_df["style_code"].fillna("").astype(str).str.strip()
-    forecast_df["year_week_norm"] = forecast_df["year_week"].fillna("").astype(str).str.strip()
+    forecast_df["year_week"] = forecast_df["year_week"].fillna("").astype(str).str.strip()
+    forecast_df["sku"] = forecast_df["sku"].fillna("").astype(str).str.strip()
     forecast_df["sale_qty_num"] = forecast_df["sale_qty"].apply(_to_float)
     forecast_df["base_stock_qty_num"] = forecast_df["BASE_STOCK_QTY"].apply(_to_float)
+    forecast_df["ipgo_qty_num"] = forecast_df["IPGO_QTY"].apply(_to_float)
+    forecast_df["loss_num"] = forecast_df["loss"].apply(_to_float)
 
     forecast_df = forecast_df[
-        (forecast_df["sku_norm"] != "") &
-        (forecast_df["year_week_norm"] != "")
+        (forecast_df["year_week"] != "") &
+        (forecast_df["sku"] != "")
     ].copy()
 
     if forecast_df.empty:
         return []
 
-    # sku + year_week 기준으로 모든 plant의 BASE_STOCK_QTY / sale_qty 합계
+    # sku + year_week 집계
     weekly_df = (
-        forecast_df.groupby(["sku_norm", "year_week_norm"], as_index=False)
+        forecast_df.groupby(["year_week", "sku"], as_index=False)
         .agg(
-            style_code=("style_code_norm", lambda s: next((x for x in s if str(x).strip()), "")),
-            plant_stock=("base_stock_qty_num", "sum"),
-            sale_qty=("sale_qty_num", "sum"),
+            total_sale_qty=("sale_qty_num", "sum"),
+            total_base_stock_qty=("base_stock_qty_num", "sum"),
+            total_ipgo_qty=("ipgo_qty_num", "sum"),
+            total_loss=("loss_num", "sum"),
         )
     )
 
-    # center_stock는 sku 기준 고정 합계
+    # center_stock sku별 합계
     if center_df.empty:
-        center_sum = pd.DataFrame(columns=["sku_norm", "center_stock"])
+        center_sum_df = pd.DataFrame(columns=["sku", "total_center_stock"])
     else:
         if "sku" not in center_df.columns:
             center_df["sku"] = None
         if "stock_qty" not in center_df.columns:
             center_df["stock_qty"] = 0
 
-        center_df["sku_norm"] = center_df["sku"].fillna("").astype(str).str.strip()
+        center_df["sku"] = center_df["sku"].fillna("").astype(str).str.strip()
         center_df["stock_qty_num"] = center_df["stock_qty"].apply(_to_float)
 
-        center_sum = (
-            center_df[center_df["sku_norm"] != ""]
-            .groupby("sku_norm", as_index=False)
-            .agg(center_stock=("stock_qty_num", "sum"))
+        center_sum_df = (
+            center_df[center_df["sku"] != ""]
+            .groupby("sku", as_index=False)
+            .agg(total_center_stock=("stock_qty_num", "sum"))
         )
 
-    df = weekly_df.merge(center_sum, how="left", on="sku_norm")
-    df["center_stock"] = df["center_stock"].fillna(0.0)
+    # merge
+    df = weekly_df.merge(center_sum_df, how="left", on="sku")
+    df["total_center_stock"] = df["total_center_stock"].fillna(0.0)
 
-    # 정렬용 숫자 컬럼
-    df["year_num"] = df["year_week_norm"].apply(lambda x: parse_year_week(x)[0])
-    df["week_num"] = df["year_week_norm"].apply(lambda x: parse_year_week(x)[1])
+    # year_week 정렬
+    df["year_num"] = df["year_week"].apply(lambda x: parse_year_week(x)[0])
+    df["week_num"] = df["year_week"].apply(lambda x: parse_year_week(x)[1])
 
-    df = df.sort_values(["sku_norm", "year_num", "week_num"]).reset_index(drop=True)
+    df = df.sort_values(["sku", "year_num", "week_num"]).reset_index(drop=True)
+
+    # sku별 cumulative_loss
+    df["cumulative_loss"] = (
+        df.groupby("sku")["total_loss"]
+        .cumsum()
+    )
 
     out: List[Dict[str, Any]] = []
 
-    for sku, g in df.groupby("sku_norm", sort=False):
-        g = g.sort_values(["year_num", "week_num"]).reset_index(drop=True)
+    for _, row in df.iterrows():
+        out.append(
+            {
+                "year_week": str(row["year_week"]).strip(),
+                "sku": str(row["sku"]).strip(),
+                "total_sale_qty": float(_to_float(row["total_sale_qty"])),
+                "total_base_stock_qty": float(_to_float(row["total_base_stock_qty"])),
+                "total_ipgo_qty": float(_to_float(row["total_ipgo_qty"])),
+                "total_loss": float(_to_float(row["total_loss"])),
+                "cumulative_loss": float(_to_float(row["cumulative_loss"])),
+                "total_center_stock": float(_to_float(row["total_center_stock"])),
+            }
+        )
 
-        running_stock = 0.0
-
-        for i, row in g.iterrows():
-            year_week = str(row["year_week_norm"]).strip()
-            style_code = str(row["style_code"]).strip()
-            plant_stock = _to_float(row["plant_stock"])
-            sale_qty = _to_float(row["sale_qty"])
-            raw_center_stock = _to_float(row["center_stock"])
-
-            # center_stock는 첫 주에만 stock 계산에 반영
-            applied_center_stock = raw_center_stock if i == 0 else 0.0
-
-            if i == 0:
-                stock = plant_stock + raw_center_stock - sale_qty
-            else:
-                stock = running_stock - sale_qty
-
-            running_stock = stock
-
-            out.append(
-                {
-                    "year_week": year_week,
-                    "style_code": style_code,
-                    "sku": sku,
-                    "stock": float(stock),
-                    "center_stock": float(applied_center_stock),
-                    "sale_qty": float(sale_qty),
-                    "plant_stock": float(plant_stock),
-                }
-            )
-
-    out.sort(key=lambda x: (
-        str(x.get("sku") or ""),
-        parse_year_week(x.get("year_week"))[0],
-        parse_year_week(x.get("year_week"))[1],
-    ))
     return out
 
 
@@ -311,8 +297,13 @@ def load_weekly_stock() -> Dict[str, Any]:
     try:
         resp = (
             client.table(weekly_stock_table)
-            .select("year_week, style_code, sku, stock, center_stock, sale_qty, plant_stock")
-            .limit(20)
+            .select(
+                "year_week, sku, total_sale_qty, total_base_stock_qty, "
+                "total_ipgo_qty, total_loss, cumulative_loss, total_center_stock"
+            )
+            .order("sku")
+            .order("year_week")
+            .limit(30)
             .execute()
         )
         sample = resp.data if resp and getattr(resp, "data", None) else []
@@ -342,7 +333,7 @@ def main():
         .block-container {
             padding-top: 2rem;
             padding-bottom: 2rem;
-            max-width: 320px;
+            max-width: 420px;
         }
         </style>
         """,
