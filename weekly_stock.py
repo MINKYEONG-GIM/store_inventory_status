@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -101,6 +101,27 @@ def _to_float(v: Any) -> float:
     return float(x)
 
 
+def parse_year_week(yyww: Any) -> Tuple[int, int]:
+    txt = str(yyww or "").strip()
+
+    if not txt:
+        return (9999, 9999)
+
+    if "-" in txt:
+        parts = txt.split("-")
+    elif len(txt) == 6 and txt.isdigit():
+        parts = [txt[:4], txt[4:]]
+    else:
+        return (9999, 9999)
+
+    try:
+        year_num = int(parts[0])
+        week_num = int(parts[1])
+        return (year_num, week_num)
+    except Exception:
+        return (9999, 9999)
+
+
 def fetch_supabase_table_all_rows(client, table_name: str, batch_size: int = 1000) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     off = 0
@@ -168,8 +189,9 @@ def build_weekly_stock_rows(
     forecast_df = pd.DataFrame(forecast_rows)
     center_df = pd.DataFrame(center_rows) if center_rows else pd.DataFrame()
 
-    required_cols = ["year_week", "style_code", "sku", "sale_qty", "BASE_STOCK_QTY"]
-    for col in required_cols:
+    # 필수 컬럼 보정
+    required_forecast_cols = ["year_week", "style_code", "sku", "sale_qty", "BASE_STOCK_QTY"]
+    for col in required_forecast_cols:
         if col not in forecast_df.columns:
             forecast_df[col] = None
 
@@ -187,17 +209,17 @@ def build_weekly_stock_rows(
     if forecast_df.empty:
         return []
 
-    # sku + year_week 기준 집계
-    weekly_sales = (
+    # sku + year_week 기준으로 모든 plant의 BASE_STOCK_QTY / sale_qty 합계
+    weekly_df = (
         forecast_df.groupby(["sku_norm", "year_week_norm"], as_index=False)
         .agg(
             style_code=("style_code_norm", lambda s: next((x for x in s if str(x).strip()), "")),
+            plant_stock=("base_stock_qty_num", "sum"),
             sale_qty=("sale_qty_num", "sum"),
-            base_stock_qty=("base_stock_qty_num", "max"),
         )
     )
 
-    # center_stock sku별 합계
+    # center_stock는 sku 기준 고정 합계
     if center_df.empty:
         center_sum = pd.DataFrame(columns=["sku_norm", "center_stock"])
     else:
@@ -215,26 +237,10 @@ def build_weekly_stock_rows(
             .agg(center_stock=("stock_qty_num", "sum"))
         )
 
-    df = weekly_sales.merge(center_sum, how="left", on="sku_norm")
+    df = weekly_df.merge(center_sum, how="left", on="sku_norm")
     df["center_stock"] = df["center_stock"].fillna(0.0)
 
-    # year_week 정렬용
-    def parse_year_week(yyww: str):
-        txt = str(yyww).strip()
-        if "-" in txt:
-            parts = txt.split("-")
-        elif len(txt) == 6 and txt.isdigit():
-            parts = [txt[:4], txt[4:]]
-        else:
-            return (9999, 9999)
-
-        try:
-            y = int(parts[0])
-            w = int(parts[1])
-            return (y, w)
-        except Exception:
-            return (9999, 9999)
-
+    # 정렬용 숫자 컬럼
     df["year_num"] = df["year_week_norm"].apply(lambda x: parse_year_week(x)[0])
     df["week_num"] = df["year_week_norm"].apply(lambda x: parse_year_week(x)[1])
 
@@ -245,18 +251,20 @@ def build_weekly_stock_rows(
     for sku, g in df.groupby("sku_norm", sort=False):
         g = g.sort_values(["year_num", "week_num"]).reset_index(drop=True)
 
-        running_stock = None
+        running_stock = 0.0
 
         for i, row in g.iterrows():
-            base_stock_qty = _to_float(row["base_stock_qty"])
+            year_week = str(row["year_week_norm"]).strip()
+            style_code = str(row["style_code"]).strip()
+            plant_stock = _to_float(row["plant_stock"])
             sale_qty = _to_float(row["sale_qty"])
             raw_center_stock = _to_float(row["center_stock"])
 
-            # 첫 주에만 center_stock 반영
+            # center_stock는 첫 주에만 stock 계산에 반영
             applied_center_stock = raw_center_stock if i == 0 else 0.0
 
             if i == 0:
-                stock = base_stock_qty + applied_center_stock - sale_qty
+                stock = plant_stock + raw_center_stock - sale_qty
             else:
                 stock = running_stock - sale_qty
 
@@ -264,16 +272,21 @@ def build_weekly_stock_rows(
 
             out.append(
                 {
-                    "year_week": str(row["year_week_norm"]).strip(),
-                    "style_code": str(row["style_code"]).strip(),
-                    "sku": str(row["sku_norm"]).strip(),
+                    "year_week": year_week,
+                    "style_code": style_code,
+                    "sku": sku,
                     "stock": float(stock),
                     "center_stock": float(applied_center_stock),
                     "sale_qty": float(sale_qty),
+                    "plant_stock": float(plant_stock),
                 }
             )
 
-    out.sort(key=lambda x: (x.get("sku") or "", x.get("year_week") or ""))
+    out.sort(key=lambda x: (
+        str(x.get("sku") or ""),
+        parse_year_week(x.get("year_week"))[0],
+        parse_year_week(x.get("year_week"))[1],
+    ))
     return out
 
 
@@ -298,7 +311,7 @@ def load_weekly_stock() -> Dict[str, Any]:
     try:
         resp = (
             client.table(weekly_stock_table)
-            .select("year_week, style_code, sku, stock, center_stock, sale_qty")
+            .select("year_week, style_code, sku, stock, center_stock, sale_qty, plant_stock")
             .limit(20)
             .execute()
         )
@@ -336,18 +349,23 @@ def main():
         unsafe_allow_html=True,
     )
 
+    st.markdown("### weekly_stock 적재")
+
     if st.button("데이터 넣기", use_container_width=True):
         try:
             with st.spinner("적재 중..."):
                 r = load_weekly_stock()
+
             st.success(
                 f"완료: forecast {r['forecast_rows']:,}행, "
                 f"center {r['center_rows']:,}행 기준, "
                 f"weekly_stock {r['inserted_rows']:,}행 저장"
             )
+
             if r.get("sample_rows"):
                 st.markdown("**적재 결과 샘플**")
                 st.dataframe(pd.DataFrame(r["sample_rows"]), use_container_width=True)
+
         except Exception as e:
             show_detailed_exception(e, title="적재 실패")
 
