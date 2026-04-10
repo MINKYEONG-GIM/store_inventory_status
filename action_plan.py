@@ -197,47 +197,77 @@ def build_step2_rows(step1_rows: List[Dict[str, Any]], center_rows: List[Dict[st
     step1_df = pd.DataFrame(step1_rows)
     center_df = pd.DataFrame(center_rows) if center_rows else pd.DataFrame()
 
+    def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return ""
+
     # step1 필수 컬럼 보정
-    for col in ["sku", "style_code", "shortage_qty", "surplus_qty", "lead_time"]:
-        if col not in step1_df.columns:
-            step1_df[col] = None
+    sku_col = _first_existing_col(step1_df, ["sku", "SKU"])
+    style_col = _first_existing_col(step1_df, ["style_code", "style", "stylecd", "STYLE_CODE"])
+    shortage_col = _first_existing_col(step1_df, ["shortage_qty", "shortage", "short_qty", "SHORTAGE_QTY"])
+    surplus_col = _first_existing_col(step1_df, ["surplus_qty", "surplus", "surp_qty", "SURPLUS_QTY"])
+    lead_time_col = _first_existing_col(step1_df, ["lead_time", "leadtime", "lt", "LEAD_TIME"])
 
-    step1_df["sku"] = step1_df["sku"].fillna("").astype(str).str.strip()
-    step1_df = step1_df[step1_df["sku"] != ""].copy()
+    if not sku_col:
+        sku_col = "sku"
+        step1_df[sku_col] = None
+    if not style_col:
+        style_col = "style_code"
+        step1_df[style_col] = None
+    if not shortage_col:
+        shortage_col = "shortage_qty"
+        step1_df[shortage_col] = None
+    if not surplus_col:
+        surplus_col = "surplus_qty"
+        step1_df[surplus_col] = None
+    if not lead_time_col:
+        lead_time_col = "lead_time"
+        step1_df[lead_time_col] = None
 
-    step1_df["style_code"] = step1_df["style_code"].fillna("").astype(str).str.strip()
-    step1_df["shortage_qty_num"] = step1_df["shortage_qty"].apply(_to_float)
-    step1_df["surplus_qty_num"] = step1_df["surplus_qty"].apply(_to_float)
-    step1_df["lead_time_num"] = step1_df["lead_time"].apply(_to_float)
+    step1_df["sku_norm"] = step1_df[sku_col].fillna("").astype(str).str.strip()
+    step1_df = step1_df[step1_df["sku_norm"] != ""].copy()
+
+    step1_df["style_code_norm"] = step1_df[style_col].fillna("").astype(str).str.strip()
+    step1_df["shortage_qty_num"] = step1_df[shortage_col].apply(_to_float)
+    step1_df["surplus_qty_num"] = step1_df[surplus_col].apply(_to_float)
+    step1_df["lead_time_num"] = step1_df[lead_time_col].apply(_to_float)
 
     step1_agg = (
-        step1_df.groupby("sku", as_index=False)
+        step1_df.groupby("sku_norm", as_index=False)
         .agg(
-            style_code=("style_code", lambda s: next((x for x in s if str(x).strip()), "")),
+            style_code=("style_code_norm", lambda s: next((x for x in s if str(x).strip()), "")),
             sum_shortage_qty=("shortage_qty_num", "sum"),
             sum_surplus_qty=("surplus_qty_num", "sum"),
             shortage_store_count=("shortage_qty_num", lambda s: int((s > 0).sum())),
             max_lead_time=("lead_time_num", "max"),
         )
     )
+    step1_agg = step1_agg.rename(columns={"sku_norm": "sku"})
 
     # center_stock 집계
     if center_df.empty:
         center_agg = pd.DataFrame(columns=["sku", "center_stock_qty"])
     else:
-        if "sku" not in center_df.columns:
-            center_df["sku"] = None
-        if "stock_qty" not in center_df.columns:
-            center_df["stock_qty"] = 0
+        center_sku_col = _first_existing_col(center_df, ["sku", "SKU"])
+        center_stock_col = _first_existing_col(center_df, ["stock_qty", "qty", "stock", "STOCK_QTY"])
+        if not center_sku_col:
+            center_sku_col = "sku"
+            center_df[center_sku_col] = None
+        if not center_stock_col:
+            center_stock_col = "stock_qty"
+            center_df[center_stock_col] = 0
 
-        center_df["sku"] = center_df["sku"].fillna("").astype(str).str.strip()
-        center_df = center_df[center_df["sku"] != ""].copy()
-        center_df["stock_qty_num"] = center_df["stock_qty"].apply(_to_float)
+        center_df["sku_norm"] = center_df[center_sku_col].fillna("").astype(str).str.strip()
+        center_df = center_df[center_df["sku_norm"] != ""].copy()
+        center_df["stock_qty_num"] = center_df[center_stock_col].apply(_to_float)
 
         center_agg = (
-            center_df.groupby("sku", as_index=False)
+            center_df.groupby("sku_norm", as_index=False)
             .agg(center_stock_qty=("stock_qty_num", "sum"))
         )
+        center_agg = center_agg.rename(columns={"sku_norm": "sku"})
 
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
@@ -310,10 +340,23 @@ def load_step2() -> Dict[str, Any]:
     clear_table_all_rows(client, step2_table)
     inserted = bulk_insert_rows(client, step2_table, result_rows)
 
+    sample = []
+    try:
+        resp = (
+            client.table(step2_table)
+            .select("sku, center_stock_qty, surplus_qty, shortage_qty")
+            .limit(10)
+            .execute()
+        )
+        sample = resp.data if resp and getattr(resp, "data", None) else []
+    except Exception:
+        sample = []
+
     return {
         "step1_rows": len(step1_rows),
         "center_rows": len(center_rows),
         "inserted_rows": inserted,
+        "sample_rows": sample,
     }
 
 
@@ -345,6 +388,9 @@ def main():
                 f"center {r['center_rows']:,}행 기준, "
                 f"step2 {r['inserted_rows']:,}행 저장"
             )
+            if r.get("sample_rows"):
+                st.markdown("**적재 결과 샘플(최대 10행)**")
+                st.dataframe(pd.DataFrame(r["sample_rows"]), use_container_width=True)
         except Exception as e:
             show_detailed_exception(e, title="적재 실패")
 
