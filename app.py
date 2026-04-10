@@ -659,6 +659,22 @@ def load_raw_file_df_from_supabase(client) -> pd.DataFrame:
     return normalize_raw_file_columns_for_prepare_final(df)
 
 
+def get_sku_weekly_forecast_table_name() -> str:
+    """
+    주차별 예측 적재 테이블명(PostgREST 노출명과 동일).
+    secrets.toml [supabase] sku_weekly_forecast_table (기본: sku_weekly_forecast_2)
+    환경변수 SUPABASE_SKU_WEEKLY_FORECAST_TABLE
+    """
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            v = st.secrets["supabase"].get("sku_weekly_forecast_table")
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    except Exception:
+        pass
+    return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_TABLE") or "sku_weekly_forecast_2").strip()
+
+
 def get_sku_forecast_run_sku_column_name() -> str:
     """
     sku_forecast_run 테이블의 SKU 컬럼 PostgREST 이름.
@@ -703,31 +719,24 @@ def sanitize_sku_forecast_run_row(rec: Dict[str, Any]) -> Dict[str, Any]:
 def build_sku_weekly_forecast_rows(
     compare_table_df: pd.DataFrame,
     sku: str,
-    sku_name: str,
     sty: str,
     plant: str,
-    store_name: str,
-    avg_discount_rate: Optional[float] = None,
-    persist_compare_extras: bool = False,
+    shape_type: str,
     current_week_no: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    화면 비교표(주차별)를 Supabase `sku_weekly_forecast` 테이블 컬럼에 맞게 변환합니다.
-    - sale_qty: 화면의「올해 해당 주차 판매량 (장)」(실적 + 미래주 GPT 예측 반영값)
-    - is_forecast: 해당 행 ISO 주차가 오늘 기준 이번 주보다 뒤이면 True(예측 판매량), 이번 주·과거면 False
-    - begin_stock: `apply_forecast_and_inventory_to_compare_table`까지 반영된 표의「기초재고」(주차별 롤링·클립과 동일)
-    - loss: 동일 표의「로스」열과 동일(기초재고 계산 로직은 변경 없음)
-    - outbound_qty: 표의「출고량(회전 등)」(주차별, 해당 SKU·매장 조합의 compare_table_df 행)
-    - inbound_qty: 표의「분배량」(동일)
-    - persist_compare_extras=True 이면 표의 작년 비중·기초재고(별칭)·분배·출고도 함께 넣습니다.
-      (Supabase에 동일 이름 컬럼을 추가한 뒤 secrets에서 켜야 합니다.)
-    - avg_discount_rate: final 시트 SALEAMT/SALEWHAN 기반 매장·SKU 할인율(동일 값을 모든 주차 행에 기록).
+    화면 비교표(주차별)를 Supabase `sku_weekly_forecast_2` 스키마 컬럼에 맞게 변환합니다.
+    - sale_qty: 「올해 해당 주차 판매량 (장)」
+    - is_forecast: ISO 주차가 이번 주보다 뒤이면 True
+    - last_year_ratio_pct: 「작년의 해당 주차 판매비중(%)」
+    - BASE_STOCK_QTY / IPGO_QTY: DB에서 대문자 식별자(따옴표)로 생성된 컬럼과 동일 키로 전달
+    - shape_type: 월별 형태 분류 라벨(동일 SKU·매장 실행에서 공통)
     """
     rows: List[Dict[str, Any]] = []
     sty_s = str(sty).strip() if sty is not None else ""
     sku_s = str(sku).strip()
     plant_s = str(plant).strip() if plant else "전체"
-    store_s = str(store_name).strip() if store_name else plant_s
+    shape_s = str(shape_type).strip() if shape_type else ""
     cw = (
         int(current_week_no)
         if current_week_no is not None
@@ -749,6 +758,9 @@ def build_sku_weekly_forecast_rows(
         peak_val = row.get("is_peak_week")
         peak = bool(peak_val) if pd.notna(peak_val) else False
 
+        ratio_raw = pd.to_numeric(row.get("작년의 해당 주차 판매비중(%)"), errors="coerce")
+        last_year_ratio = float(ratio_raw) if pd.notna(ratio_raw) else 0.0
+
         rec: Dict[str, Any] = {
             "year_week": yw,
             "sale_qty": as_supabase_int(qty),
@@ -758,24 +770,13 @@ def build_sku_weekly_forecast_rows(
             "sku": sku_s,
             "is_peak_week": peak,
             "plant": plant_s,
-            "sku_name": str(sku_name).strip(),
-            "store_name": store_s,
-            "begin_stock": as_supabase_int(row.get("기초재고")),
+            "last_year_ratio_pct": last_year_ratio,
+            "BASE_STOCK_QTY": as_supabase_int(row.get("기초재고")),
             "loss": as_supabase_int(row.get("로스")),
-            "outbound_qty": as_supabase_int(row.get("출고량(회전 등)")),
-            "inbound_qty": as_supabase_int(row.get("분배량")),
+            "IPGO_QTY": as_supabase_int(row.get("분배량")),
+            "shape_type": shape_s if shape_s else None,
+            "week_no": int(wn) if wn is not None else None,
         }
-        if avg_discount_rate is not None and pd.notna(avg_discount_rate):
-            rec["avg_discount_rate"] = float(avg_discount_rate)
-
-        if persist_compare_extras:
-            rec["last_year_ratio_pct"] = float(
-                pd.to_numeric(row.get("작년의 해당 주차 판매비중(%)"), errors="coerce") or 0
-            )
-            rec["beginning_inventory"] = as_supabase_int(row.get("기초재고"))
-            rec["distribution_qty"] = as_supabase_int(row.get("분배량"))
-            rec["shipment_qty"] = as_supabase_int(row.get("출고량(회전 등)"))
-
         rows.append(rec)
 
     return rows
@@ -791,7 +792,7 @@ def sync_sku_weekly_forecast_to_supabase(
     sku_s = str(sku).strip()
     plant_s = str(plant).strip() if plant else "전체"
 
-    tbl = client.table("sku_weekly_forecast")
+    tbl = client.table(get_sku_weekly_forecast_table_name())
     tbl.delete().eq("sku", sku_s).eq("plant", plant_s).execute()
 
     if not rows:
@@ -1051,11 +1052,11 @@ def sync_reorder_to_supabase(client, replace_all: bool = True) -> int:
 
 def clear_sku_weekly_forecast_table(client) -> None:
     """
-    sku_weekly_forecast 전체 비우기. PostgREST는 무조건 필터가 필요해
+    주차별 예측 테이블(기본 sku_weekly_forecast_2) 전체 비우기. PostgREST는 무조건 필터가 필요해
     존재할 수 없는 sku 값과의 neq로 전 행을 삭제합니다.
     """
     sentinel = "\uffff\uffff__never_match_sku__\uffff\uffff"
-    client.table("sku_weekly_forecast").delete().neq("sku", sentinel).execute()
+    client.table(get_sku_weekly_forecast_table_name()).delete().neq("sku", sentinel).execute()
 
 
 def bulk_insert_sku_weekly_forecast_rows(
@@ -1065,7 +1066,7 @@ def bulk_insert_sku_weekly_forecast_rows(
 ) -> None:
     if not rows:
         return
-    tbl = client.table("sku_weekly_forecast")
+    tbl = client.table(get_sku_weekly_forecast_table_name())
     for i in range(0, len(rows), batch_size):
         chunk = rows[i : i + batch_size]
         tbl.insert(chunk).execute()
@@ -2092,18 +2093,9 @@ def build_year_compare_table(
 # =========================
 
 
-def _persist_compare_extras_from_secrets() -> bool:
-    try:
-        if hasattr(st, "secrets") and "supabase" in st.secrets:
-            return bool(st.secrets["supabase"].get("persist_compare_table_extras", False))
-    except Exception:
-        pass
-    return False
-
-
 def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
     """
-    sku_weekly_forecast, sku_forecast_run 두 테이블만 전면 갱신합니다.
+    sku_weekly_forecast_2(설정 가능), sku_forecast_run 두 테이블만 전면 갱신합니다.
     RAW FILE에 나타난 (SKU/MATERIAL × 매장 plant_name) 조합마다 계산 후 일괄 INSERT.
     매출 형태(단봉/쌍봉 등)는 OpenAI(classify_shape use_openai=True)로 판별합니다.
     """
@@ -2130,7 +2122,6 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         pass
 
     final_prepared = prepare_final_df(final_df)
-    discount_lookup = discount_rate_lookup_by_store_sku(final_prepared)
 
     sku_store_combos = (
         final_prepared[["plant_name", "sku_name", "item_code", "sku", "style_code"]]
@@ -2160,7 +2151,6 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
 
     this_year = int(pd.Timestamp.today().year)
     current_week_no = int(pd.Timestamp.today().isocalendar().week)
-    extras_on = _persist_compare_extras_from_secrets()
 
     all_rows: List[Dict[str, Any]] = []
     all_run_rows: List[Dict[str, Any]] = []
@@ -2176,11 +2166,6 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         if not mat_sku:
             skipped_notes.append(f"{mat_plant} / (빈 sku)")
             continue
-
-        disc_key_store = (mat_plant, mat_sku)
-        avg_disc_combo = discount_lookup.get(disc_key_store)
-        if avg_disc_combo is None:
-            avg_disc_combo = discount_lookup.get(("전체", mat_sku))
 
         built = build_compare_table_for_final_option(
             plc_df,
@@ -2205,12 +2190,9 @@ def sync_forecast_tables_to_supabase() -> Dict[str, Any]:
         rows_part = build_sku_weekly_forecast_rows(
             ct,
             mat_sku,
-            mat_sku_name,
             mat_style_code,
             plant=plant_for_db,
-            store_name=store_for_db,
-            avg_discount_rate=avg_disc_combo,
-            persist_compare_extras=extras_on,
+            shape_type=shape_lbl,
             current_week_no=current_week_no,
         )
         if not rows_part:
@@ -2259,7 +2241,7 @@ def main() -> None:
                 if r["skipped"]:
                     print("[forecast_sync] skip_sample:", r["skipped"][:20])
                 st.success(
-                    f"완료: sku_weekly_forecast {r['weekly_row_count']:,}행, "
+                    f"완료: {get_sku_weekly_forecast_table_name()} {r['weekly_row_count']:,}행, "
                     f"sku_forecast_run {r['run_row_count']:,}건 "
                     f"(성공 조합 {r['success_combos']}/{r['combo_count']}, 건너뜀 {len(r['skipped'])}). "
                     "상세는 서버 로그(print)를 확인하세요."
