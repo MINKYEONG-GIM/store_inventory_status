@@ -227,44 +227,77 @@ def bulk_insert_rows(client, table_name: str, rows: List[Dict[str, Any]], batch_
 # -----------------------------
 # weekly_stock에서 shortage_start_week 계산
 # -----------------------------
-def build_shortage_start_week_map(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
+def build_shortage_start_week_map(
+    weekly_rows: List[Dict[str, Any]],
+    center_rows: List[Dict[str, Any]],
+) -> pd.DataFrame:
     if not weekly_rows:
         return pd.DataFrame(columns=["sku", "shortage_start_week"])
 
-    df = pd.DataFrame(weekly_rows)
+    weekly_df = pd.DataFrame(weekly_rows)
+    center_df = pd.DataFrame(center_rows) if center_rows else pd.DataFrame()
 
-    sku_col = _first_existing_col(df, ["sku", "SKU"])
-    stock_col = _first_existing_col(df, ["stock", "STOCK"])
-    year_week_col = _first_existing_col(df, ["year_week", "YEAR_WEEK"])
+    # weekly_stock 컬럼 찾기
+    weekly_sku_col = _first_existing_col(weekly_df, ["sku", "SKU"])
+    year_week_col = _first_existing_col(weekly_df, ["year_week", "YEAR_WEEK"])
+    loss_col = _first_existing_col(weekly_df, ["loss", "LOSS"])
 
-    if not sku_col or not stock_col or not year_week_col:
+    if not weekly_sku_col or not year_week_col or not loss_col:
         return pd.DataFrame(columns=["sku", "shortage_start_week"])
 
-    df["sku_norm"] = df[sku_col].fillna("").astype(str).str.strip()
-    df = df[df["sku_norm"] != ""].copy()
+    weekly_df["sku_norm"] = weekly_df[weekly_sku_col].fillna("").astype(str).str.strip()
+    weekly_df = weekly_df[weekly_df["sku_norm"] != ""].copy()
 
-    df["stock_num"] = df[stock_col].apply(_to_float)
-    df["week_start"] = df[year_week_col].apply(_year_week_to_week_start)
-    df = df.dropna(subset=["week_start"]).copy()
+    weekly_df["loss_num"] = weekly_df[loss_col].apply(_to_float)
+    weekly_df["week_start"] = weekly_df[year_week_col].apply(_year_week_to_week_start)
+    weekly_df = weekly_df.dropna(subset=["week_start"]).copy()
 
+    # sku + week 기준 loss 합계
     wk = (
-        df.groupby(["sku_norm", "week_start"], as_index=False)
-        .agg(stock=("stock_num", "sum"))
+        weekly_df.groupby(["sku_norm", "week_start"], as_index=False)
+        .agg(loss=("loss_num", "sum"))
         .sort_values(["sku_norm", "week_start"])
         .reset_index(drop=True)
     )
 
-    neg = wk[wk["stock"] < 0].copy()
-    if neg.empty:
+    # center_stock에서 sku별 총 센터재고 계산
+    if center_df.empty:
+        center_agg = pd.DataFrame(columns=["sku", "total_center_stock"])
+    else:
+        center_sku_col = _first_existing_col(center_df, ["sku", "SKU"])
+        center_stock_col = _first_existing_col(center_df, ["stock_qty", "STOCK_QTY", "stock"])
+
+        if not center_sku_col or not center_stock_col:
+            center_agg = pd.DataFrame(columns=["sku", "total_center_stock"])
+        else:
+            center_df["sku_norm"] = center_df[center_sku_col].fillna("").astype(str).str.strip()
+            center_df = center_df[center_df["sku_norm"] != ""].copy()
+            center_df["center_stock_qty_num"] = center_df[center_stock_col].apply(_to_float)
+
+            center_agg = (
+                center_df.groupby("sku_norm", as_index=False)
+                .agg(total_center_stock=("center_stock_qty_num", "sum"))
+                .rename(columns={"sku_norm": "sku"})
+            )
+
+    wk = wk.merge(center_agg, how="left", left_on="sku_norm", right_on="sku")
+    wk["total_center_stock"] = wk["total_center_stock"].fillna(0.0)
+
+    # sku별 누적 loss 계산
+    wk["cumulative_loss"] = wk.groupby("sku_norm")["loss"].cumsum()
+
+    # cumulative_loss > total_center_stock 가 처음 성립하는 주
+    crossed = wk[wk["cumulative_loss"] > wk["total_center_stock"]].copy()
+    if crossed.empty:
         return pd.DataFrame(columns=["sku", "shortage_start_week"])
 
-    first_neg = (
-        neg.groupby("sku_norm", as_index=False)
+    first_cross = (
+        crossed.groupby("sku_norm", as_index=False)
         .agg(shortage_start_week=("week_start", "min"))
         .rename(columns={"sku_norm": "sku"})
     )
 
-    return first_neg
+    return first_cross
 
 
 # -----------------------------
@@ -346,7 +379,7 @@ def build_step2_rows(
             .rename(columns={"sku_norm": "sku"})
         )
 
-    shortage_week_agg = build_shortage_start_week_map(weekly_rows)
+    shortage_week_agg = build_shortage_start_week_map(weekly_rows, center_rows)
 
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
