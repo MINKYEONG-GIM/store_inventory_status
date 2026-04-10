@@ -240,25 +240,38 @@ def build_shortage_start_week_map(
     # weekly_stock 컬럼 찾기
     weekly_sku_col = _first_existing_col(weekly_df, ["sku", "SKU"])
     year_week_col = _first_existing_col(weekly_df, ["year_week", "YEAR_WEEK"])
+    cumulative_loss_col = _first_existing_col(weekly_df, ["cumulative_loss", "CUMULATIVE_LOSS"])
     loss_col = _first_existing_col(weekly_df, ["loss", "LOSS"])
 
-    if not weekly_sku_col or not year_week_col or not loss_col:
+    if not weekly_sku_col or not year_week_col or (not cumulative_loss_col and not loss_col):
         return pd.DataFrame(columns=["sku", "shortage_start_week"])
 
     weekly_df["sku_norm"] = weekly_df[weekly_sku_col].fillna("").astype(str).str.strip()
     weekly_df = weekly_df[weekly_df["sku_norm"] != ""].copy()
 
-    weekly_df["loss_num"] = weekly_df[loss_col].apply(_to_float)
     weekly_df["week_start"] = weekly_df[year_week_col].apply(_year_week_to_week_start)
     weekly_df = weekly_df.dropna(subset=["week_start"]).copy()
 
-    # sku + week 기준 loss 합계
-    wk = (
-        weekly_df.groupby(["sku_norm", "week_start"], as_index=False)
-        .agg(loss=("loss_num", "sum"))
-        .sort_values(["sku_norm", "week_start"])
-        .reset_index(drop=True)
-    )
+    if cumulative_loss_col:
+        weekly_df["cumulative_loss_num"] = weekly_df[cumulative_loss_col].apply(_to_float)
+
+        # sku + week 기준 cumulative_loss 대표값(중복 행이 있으면 최대값 사용)
+        wk = (
+            weekly_df.groupby(["sku_norm", "week_start"], as_index=False)
+            .agg(cumulative_loss=("cumulative_loss_num", "max"))
+            .sort_values(["sku_norm", "week_start"])
+            .reset_index(drop=True)
+        )
+    else:
+        weekly_df["loss_num"] = weekly_df[loss_col].apply(_to_float)
+
+        # sku + week 기준 loss 합계
+        wk = (
+            weekly_df.groupby(["sku_norm", "week_start"], as_index=False)
+            .agg(loss=("loss_num", "sum"))
+            .sort_values(["sku_norm", "week_start"])
+            .reset_index(drop=True)
+        )
 
     # center_stock에서 sku별 총 센터재고 계산
     if center_df.empty:
@@ -283,8 +296,9 @@ def build_shortage_start_week_map(
     wk = wk.merge(center_agg, how="left", left_on="sku_norm", right_on="sku")
     wk["total_center_stock"] = wk["total_center_stock"].fillna(0.0)
 
-    # sku별 누적 loss 계산
-    wk["cumulative_loss"] = wk.groupby("sku_norm")["loss"].cumsum()
+    # 누적 loss 준비: weekly_stock에 cumulative_loss가 없으면 직접 계산
+    if "cumulative_loss" not in wk.columns:
+        wk["cumulative_loss"] = wk.groupby("sku_norm")["loss"].cumsum()
 
     # cumulative_loss > total_center_stock 가 처음 성립하는 주
     crossed = wk[wk["cumulative_loss"] > wk["total_center_stock"]].copy()
