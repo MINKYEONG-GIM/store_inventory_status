@@ -453,6 +453,31 @@ def _weekly_sku_loss_frame(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
 # -----------------------------
 # step2 계산
 # -----------------------------
+def _raw_total_sale_agg(raw_file_rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """RAW FILE에서 sku별 SALE_QTY 합계"""
+    if not raw_file_rows:
+        return pd.DataFrame(columns=["sku", "total_sale_qty"])
+
+    raw_df = pd.DataFrame(raw_file_rows)
+
+    sku_col = _first_existing_col(raw_df, ["sku", "SKU"])
+    sale_qty_col = _first_existing_col(raw_df, ["SALE_QTY"])
+
+    if not sku_col or not sale_qty_col:
+        return pd.DataFrame(columns=["sku", "total_sale_qty"])
+
+    raw_df["sku_norm"] = raw_df[sku_col].fillna("").astype(str).str.strip()
+    raw_df = raw_df[raw_df["sku_norm"] != ""].copy()
+
+    raw_df["sale_qty_num"] = raw_df[sale_qty_col].apply(_to_float)
+
+    return (
+        raw_df.groupby("sku_norm", as_index=False)
+        .agg(total_sale_qty=("sale_qty_num", "sum"))
+        .rename(columns={"sku_norm": "sku"})
+    )
+
+
 def _forecast_total_sale_agg(forecast_rows: List[Dict[str, Any]]) -> pd.DataFrame:
     """sku_weekly_forecast_2에서 sku별 총 판매량(또는 수량 컬럼 합계)."""
     if not forecast_rows:
@@ -590,12 +615,12 @@ def build_step2_rows(
                 .rename(columns={"sku_norm": "sku"})
             )
 
-    forecast_sale_agg = _forecast_total_sale_agg(forecast_rows or [])
+    raw_sale_agg = _raw_total_sale_agg(raw_file_rows or [])
 
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
     merged = merged.merge(raw_start_agg, how="left", on="sku")
-    merged = merged.merge(forecast_sale_agg, how="left", on="sku")
+    merged = merged.merge(raw_sale_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
     if "total_sale_qty" in merged.columns:
         merged["total_sale_qty"] = merged["total_sale_qty"].fillna(0.0)
