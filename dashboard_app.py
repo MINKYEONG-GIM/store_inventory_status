@@ -294,7 +294,140 @@ def compute_sku_metrics_from_forecast(forecast_df: pd.DataFrame, dashboard_df: p
         for col in ["lead_time", "total_shortage_qty", "shortage_qty"]:
             if col in step2_by_sku.columns:
                 step2_by_sku[col] = pd.to_numeric(step2_by_sku[col], errors="coerce")
-        step2_by_sku = step2_by_sku.sort_values("created_at", ascending=Fals
+        step2_by_sku = step2_by_sku.sort_values("created_at", ascending=False, na_position="last")
+        step2_by_sku = step2_by_sku.drop_duplicates(subset=["sku"], keep="first")
+    else:
+        step2_by_sku = pd.DataFrame(columns=["sku", "lead_time", "total_shortage_qty", "shortage_qty"])
+
+    result_rows = []
+
+    for sku, g in work.groupby("sku", dropna=False):
+        sku = str(sku).strip()
+        if not sku:
+            continue
+
+        g = g.copy()
+        g = g[g["week_no_num"].notna()]
+        if g.empty:
+            season_remaining_qty_until_maturity = 0.0
+            recommended_order_qty_now = 0.0
+        else:
+            g["week_no_num"] = g["week_no_num"].astype(int)
+            g = g.sort_values(["week_no_num", "stage"], na_position="last")
+            g_future = g[g["week_no_num"] >= current_week].copy()
+
+            # 성숙기까지 남은 판매량
+            # 현재 주차부터 시작해서 stage가 '쇠퇴기'로 바뀌기 전까지의 sale_qty 합
+            season_remaining_qty_until_maturity = 0.0
+            if not g_future.empty:
+                weekly_stage = (
+                    g_future.groupby("week_no_num", as_index=False)
+                    .agg(
+                        sale_qty=("sale_qty", "sum"),
+                        stage=("stage", lambda x: str(next((v for v in x if str(v).strip()), "")).strip()),
+                    )
+                    .sort_values("week_no_num")
+                )
+
+                for _, row in weekly_stage.iterrows():
+                    stage = str(row.get("stage") or "").strip()
+                    if stage == "쇠퇴기":
+                        break
+                    season_remaining_qty_until_maturity += _to_float(row.get("sale_qty"))
+
+            # 당장 발주량
+            # 정의: 전체 매장이 lead time + 4주를 버틸 만큼 필요한 발주량
+            # step2의 total_shortage_qty를 우선 사용하고, 없으면 forecast로 근사 계산
+            step2_row = step2_by_sku[step2_by_sku["sku"].astype(str) == sku]
+            recommended_order_qty_now = 0.0
+
+            if not step2_row.empty:
+                r = step2_row.iloc[0]
+                total_shortage_qty = _to_float(r.get("total_shortage_qty"))
+                shortage_qty = _to_float(r.get("shortage_qty"))
+                recommended_order_qty_now = max(total_shortage_qty, shortage_qty, 0.0)
+
+                if recommended_order_qty_now <= 0:
+                    lead_time_days = _to_float(r.get("lead_time"))
+                    lead_time_weeks = max(0, int((lead_time_days + 6) // 7))
+                    target_weeks = lead_time_weeks + 4
+
+                    if not g_future.empty:
+                        weekly_sales = (
+                            g_future.groupby("week_no_num", as_index=False)["sale_qty"]
+                            .sum()
+                            .sort_values("week_no_num")
+                        )
+                        recommended_order_qty_now = float(weekly_sales.head(max(target_weeks, 1))["sale_qty"].sum())
+            else:
+                weekly_sales = (
+                    g_future.groupby("week_no_num", as_index=False)["sale_qty"]
+                    .sum()
+                    .sort_values("week_no_num")
+                ) if not g_future.empty else pd.DataFrame(columns=["week_no_num", "sale_qty"])
+                recommended_order_qty_now = float(weekly_sales.head(4)["sale_qty"].sum()) if not weekly_sales.empty else 0.0
+
+        result_rows.append(
+            {
+                "sku": sku,
+                "season_remaining_qty_until_maturity": int(round(max(season_remaining_qty_until_maturity, 0.0))),
+                "recommended_order_qty_now": int(round(max(recommended_order_qty_now, 0.0))),
+            }
+        )
+
+    return pd.DataFrame(result_rows)
+
+
+
+def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    date_cols = ["created_at", "order_due_date"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    numeric_cols = [
+        "total_shortage_qty",
+        "shortage_store_count",
+        "lead_time",
+        "center_stock_qty",
+        "surplus_qty",
+        "shortage_qty",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["days_left"] = df["order_due_date"].apply(compute_days_left)
+    df["action_category"] = df.apply(classify_row, axis=1)
+    df["priority_score"] = df.apply(priority_score, axis=1)
+
+    def badge_text(category: str) -> str:
+        mapping = {
+            "즉시 발주": "🔴 즉시 발주",
+            "곧 발주": "🟠 곧 발주",
+            "발주 검토": "🟡 발주 검토",
+            "발주 불필요": "🟢 발주 불필요",
+            "장기 불필요": "⚪ 장기 불필요",
+        }
+        return mapping.get(category, category)
+
+    df["status_badge"] = df["action_category"].apply(badge_text)
+
+    if forecast_df is not None and not forecast_df.empty:
+        sku_metrics = compute_sku_metrics_from_forecast(forecast_df, df)
+        if not sku_metrics.empty:
+            df = df.merge(sku_metrics, on="sku", how="left")
+        else:
+            df["season_remaining_qty_until_maturity"] = None
+            df["recommended_order_qty_now"] = None
+    else:
+        df["season_remaining_qty_until_maturity"] = None
+        df["recommended_order_qty_now"] = None
+
+    return df
 
     date_cols = ["created_at", "order_due_date"]
     for col in date_cols:
@@ -443,6 +576,8 @@ def render_main_table(df: pd.DataFrame):
         "status_badge": "발주상태",
         "style_code": "스타일코드",
         "sku": "SKU",
+        "season_remaining_qty_until_maturity": "성숙기까지 예상판매수량",
+        "recommended_order_qty_now": "권장 발주량(지금)",
         "reorder_urgency": "긴급도",
         "reorder_needed": "발주필요",
         "days_left": "D-day",
@@ -501,6 +636,8 @@ def render_detail_panel(df: pd.DataFrame):
             "항목": [
                 "style_code",
                 "sku",
+                "season_remaining_qty_until_maturity",
+                "recommended_order_qty_now",
                 "total_shortage_qty",
                 "shortage_qty",
                 "surplus_qty",
@@ -515,22 +652,7 @@ def render_detail_panel(df: pd.DataFrame):
             ],
             "값": [
                 detail.get("style_code"),
-                detail.get("sku"),
-                detail.get("total_shortage_qty"),
-                detail.get("shortage_qty"),
-                detail.get("surplus_qty"),
-                detail.get("center_stock_qty"),
-                detail.get("shortage_store_count"),
-                detail.get("lead_time"),
-                detail.get("reorder_needed"),
-                detail.get("reorder_urgency"),
-                detail.get("order_due_date"),
-                detail.get("shortage_start_week"),
-                detail.get("created_at"),
-            ],
-        }
-    )
-    st.dataframe(detail_table, use_container_width=True, hide_index=True)
+                det
 
 
 # -------------------------------------------------
