@@ -102,6 +102,24 @@ def _to_float(v: Any) -> float:
     return float(x)
 
 
+def _parse_style_codes(text: str) -> List[str]:
+    raw = (text or "").replace("\n", ",").replace("\t", ",")
+    parts = [p.strip() for p in raw.split(",")]
+
+    out: List[str] = []
+    seen = set()
+
+    for p in parts:
+        if not p:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+
+    return out
+
+
 def parse_year_week(yyww: Any) -> Tuple[int, int]:
     txt = str(yyww or "").strip()
 
@@ -322,7 +340,10 @@ def build_weekly_stock_rows(
     return out
 
 
-def load_weekly_stock(delete_before_insert: bool = True) -> Dict[str, Any]:
+def load_weekly_stock(
+    style_codes: List[str],
+    delete_before_insert: bool = True,
+) -> Dict[str, Any]:
     client = get_supabase_client()
     if client is None:
         raise RuntimeError("Supabase 연결 불가: SUPABASE_URL / SUPABASE_KEY 설정을 확인하세요.")
@@ -331,7 +352,11 @@ def load_weekly_stock(delete_before_insert: bool = True) -> Dict[str, Any]:
     center_table = get_center_stock_table_name()
     weekly_stock_table = get_weekly_stock_table_name()
 
-    forecast_rows = fetch_supabase_table_all_rows(client, forecast_table)
+    forecast_rows = fetch_supabase_table_rows_by_style_codes(
+        client,
+        forecast_table,
+        style_codes,
+    )
     center_rows = fetch_supabase_table_all_rows(client, center_table)
 
     result_rows = build_weekly_stock_rows(forecast_rows, center_rows)
@@ -358,6 +383,7 @@ def load_weekly_stock(delete_before_insert: bool = True) -> Dict[str, Any]:
         sample = []
 
     return {
+        "filtered_style_codes": style_codes,
         "forecast_rows": len(forecast_rows),
         "center_rows": len(center_rows),
         "inserted_rows": inserted,
@@ -388,7 +414,19 @@ def main():
     )
 
     st.markdown("### weekly_stock 적재")
-    st.caption("`sku_weekly_forecast` + `center_stock` 기준으로 `weekly_stock`를 재계산해 저장합니다.")
+    st.caption("`sku_weekly_forecast`에서 원하는 `style_code`만 골라 `weekly_stock`를 계산해 저장합니다.")
+
+    style_code_text = st.text_input(
+        "가져올 style_code 입력 (여러 개는 콤마로 구분)",
+        placeholder="예: SPPPG25U0, SPRPG24G5",
+    )
+
+    style_codes = _parse_style_codes(style_code_text)
+
+    if style_codes:
+        st.caption(f"선택된 style_code: {', '.join(style_codes)}")
+    else:
+        st.caption("style_code를 비우면 전체 데이터를 가져옵니다.")
 
     delete_before_insert = st.checkbox("기존 weekly_stock 삭제 후 적재", value=True)
     if delete_before_insert:
@@ -399,10 +437,19 @@ def main():
     if st.button("weekly_stock 데이터 넣기", use_container_width=True):
         try:
             with st.spinner("적재 중..."):
-                r = load_weekly_stock(delete_before_insert=delete_before_insert)
+                r = load_weekly_stock(
+                    style_codes=style_codes,
+                    delete_before_insert=delete_before_insert,
+                )
 
+            style_code_msg = (
+                ", ".join(r.get("filtered_style_codes", []))
+                if r.get("filtered_style_codes")
+                else "전체"
+            )
             st.success(
-                f"완료: forecast {r['forecast_rows']:,}행, "
+                f"완료: style_code [{style_code_msg}] 기준 "
+                f"forecast {r['forecast_rows']:,}행, "
                 f"center {r['center_rows']:,}행 기준, "
                 f"weekly_stock {r['inserted_rows']:,}행 저장"
             )
