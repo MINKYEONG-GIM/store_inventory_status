@@ -113,6 +113,28 @@ def get_weekly_stock_table_name() -> str:
     return (os.getenv("SUPABASE_WEEKLY_STOCK_TABLE") or "weekly_stock").strip()
 
 
+def get_raw_file_table_name() -> str:
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            v = st.secrets["supabase"].get("raw_file_table")
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    except Exception:
+        pass
+    return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "RAW FILE").strip()
+
+
+def get_sku_weekly_forecast_2_table_name() -> str:
+    try:
+        if hasattr(st, "secrets") and "supabase" in st.secrets:
+            v = st.secrets["supabase"].get("sku_weekly_forecast_2_table")
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    except Exception:
+        pass
+    return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_2_TABLE") or "sku_weekly_forecast_2").strip()
+
+
 def get_step2_table_name() -> str:
     try:
         if hasattr(st, "secrets") and "supabase" in st.secrets:
@@ -357,10 +379,45 @@ def _weekly_sku_loss_frame(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
 # -----------------------------
 # step2 계산
 # -----------------------------
+def _forecast_total_sale_agg(forecast_rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """sku_weekly_forecast_2에서 sku별 총 판매량(또는 수량 컬럼 합계)."""
+    if not forecast_rows:
+        return pd.DataFrame(columns=["sku", "total_sale_qty"])
+
+    forecast_df = pd.DataFrame(forecast_rows)
+    sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
+    qty_col = _first_existing_col(
+        forecast_df,
+        [
+            "total_sale_qty",
+            "sale_qty",
+            "SALE_QTY",
+            "sold_qty",
+            "weekly_sale_qty",
+            "forecast_sale_qty",
+            "qty",
+        ],
+    )
+    if not sku_col or not qty_col:
+        return pd.DataFrame(columns=["sku", "total_sale_qty"])
+
+    forecast_df["sku_norm"] = forecast_df[sku_col].fillna("").astype(str).str.strip()
+    forecast_df = forecast_df[forecast_df["sku_norm"] != ""].copy()
+    forecast_df["qty_num"] = forecast_df[qty_col].apply(_to_float)
+
+    return (
+        forecast_df.groupby("sku_norm", as_index=False)
+        .agg(total_sale_qty=("qty_num", "sum"))
+        .rename(columns={"sku_norm": "sku"})
+    )
+
+
 def build_step2_rows(
     step1_rows: List[Dict[str, Any]],
     center_rows: List[Dict[str, Any]],
     weekly_rows: List[Dict[str, Any]],
+    raw_file_rows: Optional[List[Dict[str, Any]]] = None,
+    forecast_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if not step1_rows:
         return []
@@ -435,9 +492,39 @@ def build_step2_rows(
 
     shortage_week_agg = build_shortage_start_week_map(weekly_rows, center_rows)
 
+    raw_start_agg = pd.DataFrame(columns=["sku", "sale_start_date"])
+    if raw_file_rows:
+        raw_df = pd.DataFrame(raw_file_rows)
+
+        raw_sku_col = _first_existing_col(raw_df, ["sku", "SKU"])
+        raw_calday_col = _first_existing_col(raw_df, ["CALDAY"])
+
+        if raw_sku_col and raw_calday_col:
+            raw_df["sku_norm"] = raw_df[raw_sku_col].fillna("").astype(str).str.strip()
+            raw_df = raw_df[raw_df["sku_norm"] != ""].copy()
+
+            raw_df["sale_start_date"] = pd.to_datetime(
+                raw_df[raw_calday_col].astype(str),
+                format="%Y%m%d",
+                errors="coerce",
+            )
+
+            raw_start_agg = (
+                raw_df.dropna(subset=["sale_start_date"])
+                .groupby("sku_norm", as_index=False)
+                .agg(sale_start_date=("sale_start_date", "min"))
+                .rename(columns={"sku_norm": "sku"})
+            )
+
+    forecast_sale_agg = _forecast_total_sale_agg(forecast_rows or [])
+
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
+    merged = merged.merge(raw_start_agg, how="left", on="sku")
+    merged = merged.merge(forecast_sale_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
+    if "total_sale_qty" in merged.columns:
+        merged["total_sale_qty"] = merged["total_sale_qty"].fillna(0.0)
 
     wk_loss = _weekly_sku_loss_frame(weekly_rows)
     avg_weekly_loss_by_sku = (
@@ -492,6 +579,15 @@ def build_step2_rows(
             order_due_date = order_due_date_ts.date().isoformat()
             shortage_start_week_value = shortage_start_week.date().isoformat()
 
+        sale_start_raw = r.get("sale_start_date")
+        if pd.isna(sale_start_raw):
+            sale_start_date_value: Optional[str] = None
+        else:
+            sale_start_date_value = pd.Timestamp(sale_start_raw).normalize().date().isoformat()
+
+        style_for_monthly = str(r["style_code"]).strip() if str(r["style_code"]).strip() else ""
+        monthly_code = style_for_monthly[6] if len(style_for_monthly) >= 7 else ""
+
         out.append(
             {
                 "style_code": str(r["style_code"]).strip() if str(r["style_code"]).strip() else "",
@@ -508,6 +604,9 @@ def build_step2_rows(
                 "shortage_start_week": shortage_start_week_value,
                 "total_reorder_amount": total_reorder_amount,
                 "due_date_reorder_amount": due_date_reorder_amount,
+                "판매시작일": sale_start_date_value,
+                "판매량": float(_to_float(r.get("total_sale_qty"))),
+                "월물": monthly_code,
             }
         )
 
@@ -523,13 +622,19 @@ def load_step2() -> Dict[str, Any]:
     step1_table = get_step1_table_name()
     center_table = get_center_stock_table_name()
     weekly_table = get_weekly_stock_table_name()
+    raw_file_table = get_raw_file_table_name()
+    forecast_table = get_sku_weekly_forecast_2_table_name()
     step2_table = get_step2_table_name()
 
     step1_rows = fetch_supabase_table_all_rows(client, step1_table)
     center_rows = fetch_supabase_table_all_rows(client, center_table)
     weekly_rows = fetch_supabase_table_all_rows(client, weekly_table)
+    raw_file_rows = fetch_supabase_table_all_rows(client, raw_file_table)
+    forecast_rows = fetch_supabase_table_all_rows(client, forecast_table)
 
-    result_rows = build_step2_rows(step1_rows, center_rows, weekly_rows)
+    result_rows = build_step2_rows(
+        step1_rows, center_rows, weekly_rows, raw_file_rows, forecast_rows
+    )
 
     clear_table_all_rows(client, step2_table)
     inserted = bulk_insert_rows(client, step2_table, result_rows)
@@ -540,7 +645,8 @@ def load_step2() -> Dict[str, Any]:
             client.table(step2_table)
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
-                "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount"
+                "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
+                "판매시작일, 판매량, 월물"
             )
             .limit(10)
             .execute()
@@ -553,6 +659,8 @@ def load_step2() -> Dict[str, Any]:
         "step1_rows": len(step1_rows),
         "center_rows": len(center_rows),
         "weekly_rows": len(weekly_rows),
+        "raw_file_rows": len(raw_file_rows),
+        "forecast_rows": len(forecast_rows),
         "inserted_rows": inserted,
         "sample_rows": sample,
     }
@@ -585,6 +693,8 @@ def main():
                 f"완료: step1 {r['step1_rows']:,}행, "
                 f"center {r['center_rows']:,}행 기준, "
                 f"weekly {r['weekly_rows']:,}행 기준, "
+                f"RAW FILE {r.get('raw_file_rows', 0):,}행, "
+                f"forecast {r.get('forecast_rows', 0):,}행 기준, "
                 f"step2 {r['inserted_rows']:,}행 저장"
             )
             if r.get("sample_rows"):
