@@ -568,7 +568,6 @@ def render_main_table(df: pd.DataFrame):
         "surplus_qty": "여유수량",
         "center_stock_qty": "센터재고",
         "lead_time": "리드타임",
-        "due_date_reorder_amount": "기한 기준 발주금액",
         "shortage_start_week": "부족시작주차",
         "created_at": "생성시각",
     }
