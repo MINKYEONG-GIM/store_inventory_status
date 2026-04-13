@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -302,7 +303,32 @@ def bulk_insert_rows(client, table_name: str, rows: List[Dict[str, Any]], batch_
 
     for i in range(0, len(rows), batch_size):
         chunk = rows[i:i + batch_size]
-        tbl.insert(chunk).execute()
+        try:
+            tbl.insert(chunk).execute()
+        except Exception as e:
+            # PostgREST schema cache mismatch(없는 컬럼) 방어:
+            # 예: "Could not find the '월물' column ..."
+            msg = ""
+            try:
+                msg = str(getattr(e, "args", [""])[0] or str(e))
+            except Exception:
+                msg = str(e)
+
+            m = re.search(r"Could not find the '([^']+)' column", msg)
+            if not m:
+                raise
+
+            missing_col = m.group(1)
+            cleaned = []
+            for r in chunk:
+                if isinstance(r, dict) and missing_col in r:
+                    rr = dict(r)
+                    rr.pop(missing_col, None)
+                    cleaned.append(rr)
+                else:
+                    cleaned.append(r)
+
+            tbl.insert(cleaned).execute()
         total += len(chunk)
 
     return total
@@ -654,6 +680,7 @@ def build_step2_rows(
                 "due_date_reorder_amount": due_date_reorder_amount,
                 "판매시작일": sale_start_date_value,
                 "판매량": float(_to_float(r.get("total_sale_qty"))),
+                # step2 테이블에 컬럼이 없을 수 있어 insert 시 자동 drop 되도록 함
                 "월물": monthly_code,
             }
         )
@@ -705,7 +732,7 @@ def load_step2(
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
                 "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
-                "판매시작일, 판매량, 월물"
+                "판매시작일, 판매량"
             )
             .limit(10)
             .execute()
