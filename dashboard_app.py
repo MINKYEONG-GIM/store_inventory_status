@@ -128,7 +128,7 @@ def load_data() -> pd.DataFrame:
                 "created_at",
                 "style_code",
                 "sku",
-                "total_shortage_qty",
+                "current_shortage_qty",
                 "shortage_store_count",
                 "lead_time",
                 "reorder_needed",
@@ -138,6 +138,8 @@ def load_data() -> pd.DataFrame:
                 "surplus_qty",
                 "shortage_qty",
                 "shortage_start_week",
+                "total_reorder_amount",
+                "due_date_reorder_amount",
             ]
         )
 
@@ -195,14 +197,14 @@ def classify_row(row: pd.Series) -> str:
     urgency = str(row.get("reorder_urgency") or "").strip()
     days_left = row.get("days_left")
     shortage_qty = row.get("shortage_qty")
-    total_shortage_qty = row.get("total_shortage_qty")
+    current_shortage_qty = row.get("current_shortage_qty")
 
     shortage_qty = 0 if pd.isna(shortage_qty) else float(shortage_qty)
-    total_shortage_qty = 0 if pd.isna(total_shortage_qty) else float(total_shortage_qty)
+    current_shortage_qty = 0 if pd.isna(current_shortage_qty) else float(current_shortage_qty)
 
     # 1. 영원히 발주 안 해도 되는 후보
     # 실무에서는 완전 확정 개념은 아니므로 장기 불필요로 표시
-    if (not reorder_needed) and total_shortage_qty <= 0 and shortage_qty <= 0:
+    if (not reorder_needed) and current_shortage_qty <= 0 and shortage_qty <= 0:
         if pd.isna(row.get("order_due_date")):
             return "장기 불필요"
 
@@ -291,13 +293,13 @@ def compute_sku_metrics_from_forecast(forecast_df: pd.DataFrame, dashboard_df: p
 
     step2_by_sku = dashboard_df.copy()
     if not step2_by_sku.empty:
-        for col in ["lead_time", "total_shortage_qty", "shortage_qty"]:
+        for col in ["lead_time", "current_shortage_qty", "shortage_qty"]:
             if col in step2_by_sku.columns:
                 step2_by_sku[col] = pd.to_numeric(step2_by_sku[col], errors="coerce")
         step2_by_sku = step2_by_sku.sort_values("created_at", ascending=False, na_position="last")
         step2_by_sku = step2_by_sku.drop_duplicates(subset=["sku"], keep="first")
     else:
-        step2_by_sku = pd.DataFrame(columns=["sku", "lead_time", "total_shortage_qty", "shortage_qty"])
+        step2_by_sku = pd.DataFrame(columns=["sku", "lead_time", "current_shortage_qty", "shortage_qty"])
 
     result_rows = []
 
@@ -337,15 +339,15 @@ def compute_sku_metrics_from_forecast(forecast_df: pd.DataFrame, dashboard_df: p
 
             # 당장 발주량
             # 정의: 전체 매장이 lead time + 4주를 버틸 만큼 필요한 발주량
-            # step2의 total_shortage_qty를 우선 사용하고, 없으면 forecast로 근사 계산
+            # step2의 current_shortage_qty를 우선 사용하고, 없으면 forecast로 근사 계산
             step2_row = step2_by_sku[step2_by_sku["sku"].astype(str) == sku]
             recommended_order_qty_now = 0.0
 
             if not step2_row.empty:
                 r = step2_row.iloc[0]
-                total_shortage_qty = _to_float(r.get("total_shortage_qty"))
+                current_shortage_qty = _to_float(r.get("current_shortage_qty"))
                 shortage_qty = _to_float(r.get("shortage_qty"))
-                recommended_order_qty_now = max(total_shortage_qty, shortage_qty, 0.0)
+                recommended_order_qty_now = max(current_shortage_qty, shortage_qty, 0.0)
 
                 if recommended_order_qty_now <= 0:
                     lead_time_days = _to_float(r.get("lead_time"))
@@ -389,12 +391,14 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
     numeric_cols = [
-        "total_shortage_qty",
+        "current_shortage_qty",
         "shortage_store_count",
         "lead_time",
         "center_stock_qty",
         "surplus_qty",
         "shortage_qty",
+        "total_reorder_amount",
+        "due_date_reorder_amount",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -427,41 +431,6 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
         df["season_remaining_qty_until_maturity"] = None
         df["recommended_order_qty_now"] = None
 
-    return df
-
-    date_cols = ["created_at", "order_due_date"]
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    numeric_cols = [
-        "total_shortage_qty",
-        "shortage_store_count",
-        "lead_time",
-        "center_stock_qty",
-        "surplus_qty",
-        "shortage_qty",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["days_left"] = df["order_due_date"].apply(compute_days_left)
-    df["action_category"] = df.apply(classify_row, axis=1)
-    df["priority_score"] = df.apply(priority_score, axis=1)
-
-    # 화면 표시용 상태 배지 텍스트
-    def badge_text(category: str) -> str:
-        mapping = {
-            "즉시 발주": "🔴 즉시 발주",
-            "곧 발주": "🟠 곧 발주",
-            "발주 검토": "🟡 발주 검토",
-            "발주 불필요": "🟢 발주 불필요",
-            "장기 불필요": "⚪ 장기 불필요",
-        }
-        return mapping.get(category, category)
-
-    df["status_badge"] = df["action_category"].apply(badge_text)
     return df
 
 
@@ -539,7 +508,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     filtered = filtered.sort_values(
-        by=["priority_score", "days_left", "total_shortage_qty"],
+        by=["priority_score", "days_left", "current_shortage_qty"],
         ascending=[False, True, False],
         na_position="last",
     )
@@ -582,12 +551,14 @@ def render_main_table(df: pd.DataFrame):
         "reorder_needed": "발주필요",
         "days_left": "D-day",
         "order_due_date": "발주기한",
-        "total_shortage_qty": "총부족수량",
+        "current_shortage_qty": "현재 부족수량",
         "shortage_qty": "부족수량",
         "surplus_qty": "여유수량",
         "center_stock_qty": "센터재고",
         "shortage_store_count": "부족매장수",
         "lead_time": "리드타임",
+        "total_reorder_amount": "총 발주금액",
+        "due_date_reorder_amount": "기한 기준 발주금액",
         "shortage_start_week": "부족시작주차",
         "created_at": "생성시각",
     }
@@ -638,12 +609,14 @@ def render_detail_panel(df: pd.DataFrame):
                 "sku",
                 "season_remaining_qty_until_maturity",
                 "recommended_order_qty_now",
-                "total_shortage_qty",
+                "current_shortage_qty",
                 "shortage_qty",
                 "surplus_qty",
                 "center_stock_qty",
                 "shortage_store_count",
                 "lead_time",
+                "total_reorder_amount",
+                "due_date_reorder_amount",
                 "reorder_needed",
                 "reorder_urgency",
                 "order_due_date",
@@ -655,12 +628,14 @@ def render_detail_panel(df: pd.DataFrame):
                 detail.get("sku"),
                 detail.get("season_remaining_qty_until_maturity"),
                 detail.get("recommended_order_qty_now"),
-                detail.get("total_shortage_qty"),
+                detail.get("current_shortage_qty"),
                 detail.get("shortage_qty"),
                 detail.get("surplus_qty"),
                 detail.get("center_stock_qty"),
                 detail.get("shortage_store_count"),
                 detail.get("lead_time"),
+                detail.get("total_reorder_amount"),
+                detail.get("due_date_reorder_amount"),
                 detail.get("reorder_needed"),
                 detail.get("reorder_urgency"),
                 detail.get("order_due_date"),
@@ -711,7 +686,7 @@ def main():
               - 즉, 성숙기 종료 전까지 더 팔릴 것으로 예상되는 수량
 
             - **권장 발주량(지금)**
-              - 우선 `store_inventory_status_step2.total_shortage_qty`를 사용
+              - 우선 `store_inventory_status_step2.current_shortage_qty`를 사용
               - 이 값은 실무적으로 전체 매장이 `lead time + 4주`를 버티도록 채워야 하는 부족분으로 보는 것이 가장 적절함
               - 값이 비어 있거나 0이면, 보조 계산으로 `sku_weekly_forecast_2`의 향후 `lead time + 4주` 판매예측 합을 사용
 
@@ -731,7 +706,7 @@ def main():
               - 현재 기준으로 발주 필요가 없는 경우
 
             - **장기 불필요**
-              - 부족수량이 없고, 총부족수량도 없고, 발주기한도 없는 경우
+              - 부족수량이 없고, 현재 부족수량도 없고, 발주기한도 없는 경우
               - 실무적으로는 '당분간 발주 필요 없음' 의미로 해석하는 것이 안전합니다.
             """
         )
