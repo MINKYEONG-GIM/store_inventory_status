@@ -314,6 +314,32 @@ def build_shortage_start_week_map(
     return first_cross
 
 
+def _weekly_sku_loss_frame(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """
+    weekly_stock에서 sku별 주차·loss를 정규화한 프레임.
+    loss 컬럼이 없으면 cumulative_loss 차분 등은 하지 않고 빈 프레임 반환.
+    """
+    if not weekly_rows:
+        return pd.DataFrame(columns=["sku_norm", "week_start", "loss"])
+
+    weekly_df = pd.DataFrame(weekly_rows)
+    weekly_sku_col = _first_existing_col(weekly_df, ["sku", "SKU"])
+    year_week_col = _first_existing_col(weekly_df, ["year_week", "YEAR_WEEK"])
+    loss_col = _first_existing_col(weekly_df, ["loss", "LOSS"])
+
+    if not weekly_sku_col or not year_week_col or not loss_col:
+        return pd.DataFrame(columns=["sku_norm", "week_start", "loss"])
+
+    weekly_df["sku_norm"] = weekly_df[weekly_sku_col].fillna("").astype(str).str.strip()
+    weekly_df = weekly_df[weekly_df["sku_norm"] != ""].copy()
+    weekly_df["week_start"] = weekly_df[year_week_col].apply(_year_week_to_week_start)
+    weekly_df = weekly_df.dropna(subset=["week_start"]).copy()
+    weekly_df["loss"] = weekly_df[loss_col].apply(_to_float)
+
+    out = weekly_df[["sku_norm", "week_start", "loss"]].copy()
+    return out
+
+
 # -----------------------------
 # step2 계산
 # -----------------------------
@@ -399,6 +425,13 @@ def build_step2_rows(
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
 
+    wk_loss = _weekly_sku_loss_frame(weekly_rows)
+    avg_weekly_loss_by_sku = (
+        wk_loss.groupby("sku_norm", as_index=True)["loss"].mean()
+        if not wk_loss.empty
+        else pd.Series(dtype=float)
+    )
+
     out: List[Dict[str, Any]] = []
 
     for _, r in merged.iterrows():
@@ -408,7 +441,7 @@ def build_step2_rows(
         lead_time = int(math.ceil(max(0.0, _to_float(r["lead_time"]))))
 
         remain_qty = shortage_qty - surplus_qty - center_stock_qty
-        total_shortage_qty = max(0, int(math.ceil(remain_qty)))
+        current_shortage_qty = max(0, int(math.ceil(remain_qty)))
         reorder_needed = remain_qty > 0
 
         if shortage_qty <= 0:
@@ -419,6 +452,22 @@ def build_step2_rows(
             reorder_urgency = "발주필요"
 
         shortage_start_week = pd.to_datetime(r.get("shortage_start_week"), errors="coerce")
+
+        sku_key = str(r["sku"]).strip()
+
+        # total_reorder_amount: 부족 시작 주 이후 weekly_stock.loss 합(데이터에 있는 구간 = 성숙기까지 예측 판매 프록시)
+        total_reorder_amount: Optional[float] = None
+        if not wk_loss.empty and pd.notna(shortage_start_week):
+            ssw = pd.Timestamp(shortage_start_week).normalize()
+            sub = wk_loss[(wk_loss["sku_norm"] == sku_key) & (wk_loss["week_start"] >= ssw)]
+            total_reorder_amount = float(sub["loss"].sum())
+
+        # due_date_reorder_amount: (리드타임 일수 + 안전 4주) 동안의 예상 판매량 = (lead_time/7 + 4) * 주간 평균 loss
+        due_date_reorder_amount: Optional[float] = None
+        if sku_key in avg_weekly_loss_by_sku.index and pd.notna(avg_weekly_loss_by_sku[sku_key]):
+            avg_w = float(avg_weekly_loss_by_sku[sku_key])
+            weeks_cover = (float(lead_time) / 7.0) + 4.0
+            due_date_reorder_amount = max(0.0, weeks_cover * avg_w)
 
         if pd.isna(shortage_start_week):
             order_due_date: Optional[str] = None
@@ -433,7 +482,7 @@ def build_step2_rows(
             {
                 "style_code": str(r["style_code"]).strip() if str(r["style_code"]).strip() else "",
                 "sku": str(r["sku"]).strip(),
-                "total_shortage_qty": int(total_shortage_qty),
+                "current_shortage_qty": int(current_shortage_qty),
                 "shortage_store_count": int(r["shortage_store_count"]),
                 "lead_time": float(lead_time),
                 "reorder_needed": bool(reorder_needed),
@@ -443,6 +492,8 @@ def build_step2_rows(
                 "surplus_qty": float(surplus_qty),
                 "shortage_qty": float(shortage_qty),
                 "shortage_start_week": shortage_start_week_value,
+                "total_reorder_amount": total_reorder_amount,
+                "due_date_reorder_amount": due_date_reorder_amount,
             }
         )
 
@@ -473,7 +524,10 @@ def load_step2() -> Dict[str, Any]:
     try:
         resp = (
             client.table(step2_table)
-            .select("sku, shortage_start_week, order_due_date, center_stock_qty, surplus_qty, shortage_qty")
+            .select(
+                "sku, current_shortage_qty, shortage_start_week, order_due_date, "
+                "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount"
+            )
             .limit(10)
             .execute()
         )
