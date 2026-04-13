@@ -308,7 +308,7 @@ def build_shortage_start_week_map(
             )
 
     wk = wk.merge(center_agg, how="left", left_on="sku_norm", right_on="sku")
-    wk["total_center_stock"] = wk["total_center_stock"].fillna(0.0)
+    wk["total_center_stock"] = wk["total_center_stock"].fillna(0.0).clip(lower=0.0)
 
     # 누적 loss 준비: weekly_stock에 cumulative_loss가 없으면 직접 계산
     if "cumulative_loss" not in wk.columns:
