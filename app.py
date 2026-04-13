@@ -405,44 +405,119 @@ def bulk_insert_step1(client, rows: List[Dict[str, Any]], batch_size: int = 200)
     return n
 
 
-def run_stack_data(client) -> Dict[str, Any]:
+def parse_style_code_input(text: str) -> List[str]:
+    if not text or not str(text).strip():
+        return []
+    items = [x.strip() for x in str(text).split(",")]
+    return [x for x in items if x]
+
+
+def run_stack_data(
+    client,
+    style_codes: Optional[List[str]] = None,
+    replace_mode: bool = True,
+) -> Dict[str, Any]:
     wf_tbl = get_sku_weekly_forecast_table_name()
     raw = fetch_supabase_table_all_rows(client, wf_tbl)
     if not raw:
         return {"forecast_rows": 0, "step1_rows": 0, "message": "sku_weekly_forecast_2 가 비어 있습니다."}
 
     df = pd.DataFrame(raw)
+
+    if style_codes:
+        style_c = _col(df, "style_code")
+        if style_c is None:
+            raise ValueError("sku_weekly_forecast_2 테이블에 style_code 컬럼이 없습니다.")
+
+        df[style_c] = df[style_c].fillna("").astype(str).str.strip()
+        style_code_set = {str(x).strip() for x in style_codes if str(x).strip()}
+        df = df[df[style_c].isin(style_code_set)].copy()
+
+        if df.empty:
+            return {
+                "forecast_rows": len(raw),
+                "filtered_rows": 0,
+                "step1_rows": 0,
+                "groups": 0,
+                "message": "입력한 style_code와 일치하는 데이터가 없습니다.",
+            }
+
     step1_rows = compute_step1_rows_from_forecast_df(df)
-    clear_step1_table(client)
+
+    if replace_mode:
+        clear_step1_table(client)
+
     inserted = bulk_insert_step1(client, step1_rows)
     return {
         "forecast_rows": len(raw),
+        "filtered_rows": len(df),
         "step1_rows": inserted,
         "groups": len(step1_rows),
+        "replace_mode": replace_mode,
     }
 
 
 def main() -> None:
-    if st.button("데이터 쌓기", type="primary"):
-        sb = get_supabase_client()
-        if sb is None:
-            st.error("Supabase 연결 불가. secrets [supabase] url·service_role_key 를 설정하세요.")
-            return
-        with st.spinner(
-            f"{get_sku_weekly_forecast_table_name()} 전체 로드 후 "
-            f"{get_store_inventory_status_step1_table_name()} 에 적재 중…"
-        ):
-            try:
-                r = run_stack_data(sb)
-                st.success(
-                    f"완료: 예측 테이블 {r['forecast_rows']:,}행 기준 → "
-                    f"매장 조합 {r.get('groups', 0):,}건 → "
-                    f"{get_store_inventory_status_step1_table_name()} {r['step1_rows']:,}행 저장."
+    style_code_input = st.text_input(
+        "적재할 style_code",
+        placeholder="예: SPPPG25U01",
+        help="비워두면 전체 style_code를 적재합니다. 여러 개는 쉼표(,)로 구분하세요.",
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        append_clicked = st.button("누적해서 쌓기", type="primary")
+
+    with col2:
+        replace_clicked = st.button("기존 데이터 삭제 후 쌓기")
+
+    if not append_clicked and not replace_clicked:
+        return
+
+    sb = get_supabase_client()
+    if sb is None:
+        st.error("Supabase 연결 불가. secrets [supabase] url·service_role_key 를 설정하세요.")
+        return
+
+    style_codes = parse_style_code_input(style_code_input)
+    replace_mode = bool(replace_clicked)
+
+    action_text = "기존 데이터 삭제 후 적재" if replace_mode else "기존 데이터 유지 후 누적 적재"
+
+    with st.spinner(
+        f"{get_sku_weekly_forecast_table_name()} 로드 후 "
+        f"{get_store_inventory_status_step1_table_name()} 에 {action_text} 중…"
+    ):
+        try:
+            r = run_stack_data(
+                sb,
+                style_codes=style_codes,
+                replace_mode=replace_mode,
+            )
+
+            msg = (
+                f"완료: 원본 {r['forecast_rows']:,}행"
+                + (
+                    f" → 필터 후 {r.get('filtered_rows', 0):,}행"
+                    if "filtered_rows" in r
+                    else ""
                 )
-                if r.get("message"):
-                    st.info(r["message"])
-            except Exception as e:
-                show_detailed_exception(e, title="데이터 쌓기 실패")
+                + f" → 매장 조합 {r.get('groups', 0):,}건"
+                + f" → {get_store_inventory_status_step1_table_name()} {r['step1_rows']:,}행 저장."
+            )
+            st.success(msg)
+
+            if replace_mode:
+                st.info("기존 데이터를 모두 삭제한 뒤 새로 적재했습니다.")
+            else:
+                st.info("기존 데이터는 유지하고 새 데이터를 뒤에 누적해서 적재했습니다.")
+
+            if r.get("message"):
+                st.info(r["message"])
+
+        except Exception as e:
+            show_detailed_exception(e, title="데이터 쌓기 실패")
 
 
 if __name__ == "__main__":
