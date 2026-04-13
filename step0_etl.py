@@ -79,11 +79,6 @@ def fetch_all_rows(client, table_name: str, select_sql: str, batch_size: int = 1
     return rows
 
 
-def delete_all_rows(client, table_name: str, key_col: str):
-    sentinel = "__never_match__"
-    client.table(table_name).delete().neq(key_col, sentinel).execute()
-
-
 def insert_in_chunks(client, table_name: str, rows: list, batch_size: int = 500):
     if not rows:
         return
@@ -234,13 +229,10 @@ def run_job():
     rows = build_forecast_rows(raw_df)
     st.write(f"생성 rows: {len(rows):,}")
 
-    st.write("3. 기존 sku_weekly_forecast 삭제 중...")
-    delete_all_rows(client, SKU_WEEKLY_FORECAST_TABLE, key_col="sku")
-
-    st.write("4. 새 데이터 insert 중...")
+    st.write("3. 기존 데이터 유지 — 새 행만 추가(누적) 중...")
     insert_in_chunks(client, SKU_WEEKLY_FORECAST_TABLE, rows, batch_size=500)
 
-    st.success(f"완료: {len(rows):,}건 적재")
+    st.success(f"완료: {len(rows):,}건 추가 적재 (기존 행은 유지)")
 
 
 st.set_page_config(page_title="sku_weekly_forecast 적재", layout="wide")
