@@ -202,6 +202,10 @@ def classify_row(row: pd.Series) -> str:
     shortage_qty = 0 if pd.isna(shortage_qty) else float(shortage_qty)
     current_shortage_qty = 0 if pd.isna(current_shortage_qty) else float(current_shortage_qty)
 
+    # 발주기한이 내일(오늘+1일) 미만이면 발주 시점 경과 (날짜 기준 오늘 포함)
+    if days_left is not None and days_left < 1:
+        return "발주시점 지남"
+
     # 1. 영원히 발주 안 해도 되는 후보
     # 실무에서는 완전 확정 개념은 아니므로 장기 불필요로 표시
     if (not reorder_needed) and current_shortage_qty <= 0 and shortage_qty <= 0:
@@ -234,7 +238,9 @@ def priority_score(row: pd.Series) -> int:
     category = row.get("action_category")
     days_left = row.get("days_left")
 
-    if category == "즉시 발주":
+    if category == "발주시점 지남":
+        base = 500
+    elif category == "즉시 발주":
         base = 400
     elif category == "곧 발주":
         base = 300
@@ -410,6 +416,7 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
 
     def badge_text(category: str) -> str:
         mapping = {
+            "발주시점 지남": "⏱ 발주시점 지남",
             "즉시 발주": "🔴 즉시 발주",
             "곧 발주": "🟠 곧 발주",
             "발주 검토": "🟡 발주 검토",
@@ -445,11 +452,11 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     sku_keyword = st.sidebar.text_input("SKU 검색")
 
     st.sidebar.write("### 상태 필터")
-    category_options = ["즉시 발주", "곧 발주", "발주 검토", "발주 불필요", "장기 불필요"]
+    category_options = ["발주시점 지남", "즉시 발주", "곧 발주", "발주 검토", "발주 불필요", "장기 불필요"]
     selected_categories = st.sidebar.multiselect(
         "발주 상태",
         options=category_options,
-        default=["즉시 발주", "곧 발주", "발주 검토", "발주 불필요", "장기 불필요"],
+        default=category_options,
     )
 
     urgency_options = sorted([x for x in df["reorder_urgency"].dropna().astype(str).unique().tolist() if x.strip()])
@@ -496,7 +503,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[filtered["reorder_needed"].apply(normalize_boolean)]
 
     if only_overdue:
-        filtered = filtered[filtered["days_left"].notna() & (filtered["days_left"] < 0)]
+        filtered = filtered[filtered["days_left"].notna() & (filtered["days_left"] < 1)]
 
     if only_shortage:
         filtered = filtered[
@@ -520,15 +527,15 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 # KPI
 # -------------------------------------------------
 def render_kpis(df: pd.DataFrame):
+    past_order_point_count = (df["action_category"] == "발주시점 지남").sum()
     immediate_count = (df["action_category"] == "즉시 발주").sum()
     soon_count = (df["action_category"] == "곧 발주").sum()
-    overdue_count = ((df["days_left"].notna()) & (df["days_left"] < 0)).sum()
     reorder_count = df["reorder_needed"].apply(normalize_boolean).sum()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("즉시 발주", int(immediate_count))
-    c2.metric("곧 발주", int(soon_count))
-    c3.metric("기한 초과", int(overdue_count))
+    c1.metric("발주시점 지남", int(past_order_point_count))
+    c2.metric("즉시 발주", int(immediate_count))
+    c3.metric("곧 발주", int(soon_count))
     c4.metric("발주 필요", int(reorder_count))
 
 
@@ -689,6 +696,9 @@ def main():
               - 우선 `store_inventory_status_step2.current_shortage_qty`를 사용
               - 이 값은 실무적으로 전체 매장이 `lead time + 4주`를 버티도록 채워야 하는 부족분으로 보는 것이 가장 적절함
               - 값이 비어 있거나 0이면, 보조 계산으로 `sku_weekly_forecast_2`의 향후 `lead time + 4주` 판매예측 합을 사용
+
+            - **발주시점 지남**
+              - `order_due_date`가 내일(오늘+1일) 미만인 경우 (날짜 기준 당일 포함)
 
             - **즉시 발주**
               - `reorder_needed = true` 이고
