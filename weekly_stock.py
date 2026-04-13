@@ -233,7 +233,7 @@ def build_weekly_stock_rows(
             center_df["stock_qty"] = 0
 
         center_df["sku"] = center_df["sku"].fillna("").astype(str).str.strip()
-        center_df["stock_qty_num"] = center_df["stock_qty"].apply(_to_float)
+        center_df["stock_qty_num"] = center_df["stock_qty"].apply(_to_float).clip(lower=0)
 
         center_sum_df = (
             center_df[center_df["sku"] != ""]
