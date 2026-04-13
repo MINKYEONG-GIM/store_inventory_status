@@ -140,6 +140,9 @@ def load_data() -> pd.DataFrame:
                 "shortage_start_week",
                 "total_reorder_amount",
                 "due_date_reorder_amount",
+                "sale_start_date",
+                "total_sale_qty",
+                "monthly_code",
             ]
         )
 
@@ -391,7 +394,7 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
     if df.empty:
         return df
 
-    date_cols = ["created_at", "order_due_date"]
+    date_cols = ["created_at", "order_due_date", "sale_start_date"]
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -405,6 +408,7 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
         "shortage_qty",
         "total_reorder_amount",
         "due_date_reorder_amount",
+        "total_sale_qty",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -547,15 +551,19 @@ def render_main_table(df: pd.DataFrame):
 
     view_df["order_due_date"] = view_df["order_due_date"].dt.strftime("%Y-%m-%d")
     view_df["created_at"] = view_df["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    if "sale_start_date" in view_df.columns:
+        view_df["sale_start_date"] = view_df["sale_start_date"].dt.strftime("%Y-%m-%d")
 
     display_columns = {
         "status_badge": "발주상태",
         "style_code": "스타일코드",
         "sku": "SKU",
+        "sale_start_date": "판매시작일",
+        "total_sale_qty": "판매량",
+        "monthly_code": "월물",
         "season_remaining_qty_until_maturity": "성숙기까지 예상판매수량",
         "recommended_order_qty_now": "권장 발주량(지금)",
-        "reorder_urgency": "긴급도",
-        "reorder_needed": "발주필요",
+        "reorder_urgency": "회전/리오더",
         "days_left": "D-day",
         "order_due_date": "발주기한",
         "current_shortage_qty": "현재 부족수량",
@@ -614,6 +622,9 @@ def render_detail_panel(df: pd.DataFrame):
             "항목": [
                 "style_code",
                 "sku",
+                "sale_start_date",
+                "total_sale_qty",
+                "monthly_code",
                 "season_remaining_qty_until_maturity",
                 "recommended_order_qty_now",
                 "current_shortage_qty",
@@ -633,6 +644,9 @@ def render_detail_panel(df: pd.DataFrame):
             "값": [
                 detail.get("style_code"),
                 detail.get("sku"),
+                detail.get("sale_start_date"),
+                detail.get("total_sale_qty"),
+                detail.get("monthly_code"),
                 detail.get("season_remaining_qty_until_maturity"),
                 detail.get("recommended_order_qty_now"),
                 detail.get("current_shortage_qty"),
