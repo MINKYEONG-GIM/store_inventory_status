@@ -730,7 +730,7 @@ def load_step2(
             client.table(step2_table)
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
-                "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
+                "reorder_urgency, center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
                 "sale_start_date, total_sale_qty, monthly_code"
             )
             .limit(10)
@@ -815,7 +815,36 @@ def main():
 
             if r.get("sample_rows"):
                 st.markdown("**적재 결과 샘플(최대 10행)**")
-                st.dataframe(pd.DataFrame(r["sample_rows"]), use_container_width=True)
+                sample_df = pd.DataFrame(r["sample_rows"]).rename(
+                    columns={
+                        "reorder_urgency": "회전/리오더",
+                        "sale_start_date": "판매시작일",
+                        "total_sale_qty": "판매량",
+                        "monthly_code": "월물",
+                    }
+                )
+                sample_df = sample_df.drop(columns=["reorder_needed", "발주필요"], errors="ignore")
+
+                preferred_order = [
+                    "sku",
+                    "current_shortage_qty",
+                    "회전/리오더",
+                    "shortage_start_week",
+                    "order_due_date",
+                    "center_stock_qty",
+                    "surplus_qty",
+                    "shortage_qty",
+                    "total_reorder_amount",
+                    "due_date_reorder_amount",
+                    "판매시작일",
+                    "판매량",
+                    "월물",
+                ]
+                ordered_cols = [c for c in preferred_order if c in sample_df.columns]
+                remaining_cols = [c for c in sample_df.columns if c not in ordered_cols]
+                sample_df = sample_df[ordered_cols + remaining_cols]
+
+                st.dataframe(sample_df, use_container_width=True)
 
         except Exception as e:
             show_detailed_exception(e, title="적재 실패")
