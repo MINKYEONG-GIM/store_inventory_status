@@ -470,18 +470,18 @@ def build_step2_rows(
         sku_key = str(r["sku"]).strip()
 
         # total_reorder_amount: 부족 시작 주 이후 weekly_stock.loss 합(데이터에 있는 구간 = 성숙기까지 예측 판매 프록시)
-        total_reorder_amount: Optional[float] = None
+        total_reorder_amount: Optional[int] = None
         if not wk_loss.empty and pd.notna(shortage_start_week):
             ssw = pd.Timestamp(shortage_start_week).normalize()
             sub = wk_loss[(wk_loss["sku_norm"] == sku_key) & (wk_loss["week_start"] >= ssw)]
-            total_reorder_amount = float(sub["loss"].sum())
+            total_reorder_amount = int(round(float(sub["loss"].sum())))
 
         # due_date_reorder_amount: (리드타임 일수 + 안전 4주) 동안의 예상 판매량 = (lead_time/7 + 4) * 주간 평균 loss
-        due_date_reorder_amount: Optional[float] = None
+        due_date_reorder_amount: Optional[int] = None
         if sku_key in avg_weekly_loss_by_sku.index and pd.notna(avg_weekly_loss_by_sku[sku_key]):
             avg_w = float(avg_weekly_loss_by_sku[sku_key])
             weeks_cover = (float(lead_time) / 7.0) + 4.0
-            due_date_reorder_amount = max(0.0, weeks_cover * avg_w)
+            due_date_reorder_amount = int(round(max(0.0, weeks_cover * avg_w)))
 
         if pd.isna(shortage_start_week):
             order_due_date: Optional[str] = None
