@@ -83,6 +83,10 @@ def get_forecast_table_name() -> str:
     return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_2_TABLE") or "sku_weekly_forecast_2").strip()
 
 
+def get_forecast_source_table_name() -> str:
+    return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_TABLE") or "sku_weekly_forecast").strip()
+
+
 def get_center_stock_table_name() -> str:
     return (os.getenv("SUPABASE_CENTER_STOCK_TABLE") or "center_stock").strip()
 
@@ -139,6 +143,51 @@ def fetch_supabase_table_all_rows(client, table_name: str, batch_size: int = 100
             resp = (
                 client.table(table_name)
                 .select("*")
+                .range(off, off + batch_size - 1)
+                .execute()
+            )
+
+        chunk = resp.data if resp.data else []
+        if not chunk:
+            break
+
+        rows.extend(chunk)
+
+        if len(chunk) < batch_size:
+            break
+
+        off += batch_size
+
+    return rows
+
+
+def fetch_supabase_table_rows_by_style_codes(
+    client,
+    table_name: str,
+    style_codes: List[str],
+    batch_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    if not style_codes:
+        return fetch_supabase_table_all_rows(client, table_name, batch_size=batch_size)
+
+    rows: List[Dict[str, Any]] = []
+    off = 0
+
+    while True:
+        try:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .in_("style_code", style_codes)
+                .limit(batch_size)
+                .offset(off)
+                .execute()
+            )
+        except Exception:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .in_("style_code", style_codes)
                 .range(off, off + batch_size - 1)
                 .execute()
             )
@@ -318,11 +367,62 @@ def load_weekly_stock() -> Dict[str, Any]:
     }
 
 
+def _parse_style_codes(text: str) -> List[str]:
+    raw = (text or "").replace("\n", ",").replace("\t", ",")
+    parts = [p.strip() for p in raw.split(",")]
+    out: List[str] = []
+    seen = set()
+    for p in parts:
+        if not p:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def load_forecast_2_from_forecast(style_codes: List[str], delete_before_insert: bool = False) -> Dict[str, Any]:
+    client = get_supabase_client()
+    if client is None:
+        raise RuntimeError("Supabase 연결 불가: SUPABASE_URL / SUPABASE_KEY 설정을 확인하세요.")
+
+    src_table = get_forecast_source_table_name()
+    dst_table = get_forecast_table_name()
+
+    src_rows = fetch_supabase_table_rows_by_style_codes(client, src_table, style_codes)
+
+    if style_codes and not src_rows:
+        raise RuntimeError(
+            f"입력한 style_code({', '.join(style_codes)})에 해당하는 데이터가 `{src_table}`에 없습니다."
+        )
+
+    if delete_before_insert:
+        clear_table_all_rows(client, dst_table)
+    inserted = bulk_insert_rows(client, dst_table, src_rows)
+
+    sample: List[Dict[str, Any]] = []
+    try:
+        resp = client.table(dst_table).select("*").limit(30).execute()
+        sample = resp.data if resp and getattr(resp, "data", None) else []
+    except Exception:
+        sample = []
+
+    return {
+        "source_table": src_table,
+        "dest_table": dst_table,
+        "filtered_style_codes": style_codes,
+        "source_rows": len(src_rows),
+        "inserted_rows": inserted,
+        "sample_rows": sample,
+    }
+
+
 # -----------------------------
 # 화면
 # -----------------------------
 def main():
-    st.set_page_config(page_title="weekly_stock loader", layout="centered")
+    st.set_page_config(page_title="loader", layout="centered")
 
     st.markdown(
         """
@@ -340,15 +440,52 @@ def main():
         unsafe_allow_html=True,
     )
 
-    st.markdown("### weekly_stock 적재")
+    st.markdown("### sku_weekly_forecast_2 적재 (style_code 필터)")
+    st.caption("`sku_weekly_forecast`에서 원하는 `style_code`만 골라 `sku_weekly_forecast_2`로 복사 적재합니다.")
 
-    if st.button("데이터 넣기", use_container_width=True):
+    style_code_text = st.text_input(
+        "style_code 입력 (여러 개는 콤마로 구분)",
+        placeholder="예: ST0001, ST0002",
+    )
+    style_codes = _parse_style_codes(style_code_text)
+    if style_codes:
+        st.caption(f"입력된 style_code: {', '.join(style_codes)}")
+    else:
+        st.caption("style_code를 비우면 전체를 적재합니다.")
+
+    delete_before_insert = st.checkbox("기존 데이터 삭제 후 적재", value=False)
+    if not delete_before_insert:
+        st.caption("현재 설정: 기존 데이터를 삭제하지 않고 **누적 적재**합니다. (중복 적재될 수 있어요)")
+
+    if st.button("sku_weekly_forecast → sku_weekly_forecast_2 적재", use_container_width=True):
+        try:
+            with st.spinner("적재 중..."):
+                r = load_forecast_2_from_forecast(style_codes, delete_before_insert=delete_before_insert)
+
+            st.success(
+                f"완료: `{r['source_table']}`에서 {r['source_rows']:,}행 조회 → "
+                f"`{r['dest_table']}`에 {r['inserted_rows']:,}행 저장"
+            )
+
+            if r.get("sample_rows"):
+                st.markdown("**적재 결과 샘플**")
+                st.dataframe(pd.DataFrame(r["sample_rows"]), use_container_width=True)
+
+        except Exception as e:
+            show_detailed_exception(e, title="적재 실패")
+
+    st.divider()
+
+    st.markdown("### weekly_stock 적재")
+    st.caption("`sku_weekly_forecast_2` + `center_stock` 기준으로 `weekly_stock`를 재계산해 저장합니다.")
+
+    if st.button("weekly_stock 데이터 넣기", use_container_width=True):
         try:
             with st.spinner("적재 중..."):
                 r = load_weekly_stock()
 
             st.success(
-                f"완료: forecast {r['forecast_rows']:,}행, "
+                f"완료: forecast_2 {r['forecast_rows']:,}행, "
                 f"center {r['center_rows']:,}행 기준, "
                 f"weekly_stock {r['inserted_rows']:,}행 저장"
             )
