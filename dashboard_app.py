@@ -652,7 +652,24 @@ def render_detail_panel(df: pd.DataFrame):
             ],
             "값": [
                 detail.get("style_code"),
-                det
+                detail.get("sku"),
+                detail.get("season_remaining_qty_until_maturity"),
+                detail.get("recommended_order_qty_now"),
+                detail.get("total_shortage_qty"),
+                detail.get("shortage_qty"),
+                detail.get("surplus_qty"),
+                detail.get("center_stock_qty"),
+                detail.get("shortage_store_count"),
+                detail.get("lead_time"),
+                detail.get("reorder_needed"),
+                detail.get("reorder_urgency"),
+                detail.get("order_due_date"),
+                detail.get("shortage_start_week"),
+                detail.get("created_at"),
+            ],
+        }
+    )
+    st.dataframe(detail_table, use_container_width=True, hide_index=True)
 
 
 # -------------------------------------------------
@@ -661,6 +678,7 @@ def render_detail_panel(df: pd.DataFrame):
 def main():
     try:
         raw_df = load_data()
+        forecast_df = load_forecast_data()
     except Exception as e:
         st.error(f"데이터를 불러오지 못했습니다: {e}")
         st.stop()
@@ -669,7 +687,7 @@ def main():
         st.warning("store_inventory_status_step2 테이블에 데이터가 없습니다.")
         st.stop()
 
-    df = prepare_dataframe(raw_df)
+    df = prepare_dataframe(raw_df, forecast_df)
     filtered_df = apply_filters(df)
 
     render_kpis(filtered_df)
@@ -687,6 +705,16 @@ def main():
     with st.expander("판정 기준 설명"):
         st.markdown(
             """
+            - **성숙기까지 예상판매수량**
+              - `sku_weekly_forecast_2`에서 현재 주차부터 시작
+              - `stage = 쇠퇴기`가 나오기 전까지의 주차별 `sale_qty` 합
+              - 즉, 성숙기 종료 전까지 더 팔릴 것으로 예상되는 수량
+
+            - **권장 발주량(지금)**
+              - 우선 `store_inventory_status_step2.total_shortage_qty`를 사용
+              - 이 값은 실무적으로 전체 매장이 `lead time + 4주`를 버티도록 채워야 하는 부족분으로 보는 것이 가장 적절함
+              - 값이 비어 있거나 0이면, 보조 계산으로 `sku_weekly_forecast_2`의 향후 `lead time + 4주` 판매예측 합을 사용
+
             - **즉시 발주**
               - `reorder_needed = true` 이고
               - `reorder_urgency = 긴급` 이거나
