@@ -141,6 +141,20 @@ def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
     return ""
 
 
+def _weekly_loss_source_col(weekly_df: pd.DataFrame) -> str:
+    """
+    weekly_stock에서 주간 loss에 해당하는 컬럼명.
+    loss / total_loss 우선, 없으면 sale_qty 등으로 대체(스키마별 이름 차이 대응).
+    """
+    loss_col = _first_existing_col(
+        weekly_df,
+        ["loss", "LOSS", "total_loss", "TOTAL_LOSS", "weekly_loss", "WEEKLY_LOSS"],
+    )
+    if loss_col:
+        return loss_col
+    return _first_existing_col(weekly_df, ["sale_qty", "SALE_QTY"])
+
+
 def _year_week_to_week_start(year_week: Any) -> pd.Timestamp:
     """
     year_week 예:
@@ -241,7 +255,7 @@ def build_shortage_start_week_map(
     weekly_sku_col = _first_existing_col(weekly_df, ["sku", "SKU"])
     year_week_col = _first_existing_col(weekly_df, ["year_week", "YEAR_WEEK"])
     cumulative_loss_col = _first_existing_col(weekly_df, ["cumulative_loss", "CUMULATIVE_LOSS"])
-    loss_col = _first_existing_col(weekly_df, ["loss", "LOSS"])
+    loss_col = _weekly_loss_source_col(weekly_df)
 
     if not weekly_sku_col or not year_week_col or (not cumulative_loss_col and not loss_col):
         return pd.DataFrame(columns=["sku", "shortage_start_week"])
@@ -317,7 +331,7 @@ def build_shortage_start_week_map(
 def _weekly_sku_loss_frame(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     weekly_stock에서 sku별 주차·loss를 정규화한 프레임.
-    loss 컬럼이 없으면 cumulative_loss 차분 등은 하지 않고 빈 프레임 반환.
+    loss/total_loss 등이 없고 sale_qty 등 대체 컬럼도 없으면 빈 프레임 반환.
     """
     if not weekly_rows:
         return pd.DataFrame(columns=["sku_norm", "week_start", "loss"])
@@ -325,7 +339,7 @@ def _weekly_sku_loss_frame(weekly_rows: List[Dict[str, Any]]) -> pd.DataFrame:
     weekly_df = pd.DataFrame(weekly_rows)
     weekly_sku_col = _first_existing_col(weekly_df, ["sku", "SKU"])
     year_week_col = _first_existing_col(weekly_df, ["year_week", "YEAR_WEEK"])
-    loss_col = _first_existing_col(weekly_df, ["loss", "LOSS"])
+    loss_col = _weekly_loss_source_col(weekly_df)
 
     if not weekly_sku_col or not year_week_col or not loss_col:
         return pd.DataFrame(columns=["sku_norm", "week_start", "loss"])
