@@ -678,10 +678,9 @@ def build_step2_rows(
                 "shortage_start_week": shortage_start_week_value,
                 "total_reorder_amount": total_reorder_amount,
                 "due_date_reorder_amount": due_date_reorder_amount,
-                "판매시작일": sale_start_date_value,
-                "판매량": float(_to_float(r.get("total_sale_qty"))),
-                # step2 테이블에 컬럼이 없을 수 있어 insert 시 자동 drop 되도록 함
-                "월물": monthly_code,
+                "sale_start_date": sale_start_date_value,
+                "total_sale_qty": float(_to_float(r.get("total_sale_qty"))),
+                "monthly_code": monthly_code,
             }
         )
 
@@ -732,7 +731,7 @@ def load_step2(
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
                 "center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
-                "판매시작일, 판매량"
+                "sale_start_date, total_sale_qty, monthly_code"
             )
             .limit(10)
             .execute()
