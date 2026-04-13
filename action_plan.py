@@ -424,8 +424,8 @@ def build_step2_rows(
             order_due_date: Optional[str] = None
             shortage_start_week_value: Optional[str] = None
         else:
-            order_week_gap = lead_time + 2 + 1
-            order_due_date_ts = shortage_start_week - pd.Timedelta(weeks=order_week_gap)
+            safety_days = 14  # 안전주수 2주
+            order_due_date_ts = shortage_start_week - pd.Timedelta(days=lead_time + safety_days)
             order_due_date = order_due_date_ts.date().isoformat()
             shortage_start_week_value = shortage_start_week.date().isoformat()
 
