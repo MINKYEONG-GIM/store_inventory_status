@@ -1,10 +1,14 @@
 import os
-from datetime import date
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
+
+try:
+    from supabase import create_client as _create_supabase_client
+except ImportError:
+    _create_supabase_client = None
 
 
 # -------------------------------------------------
@@ -21,28 +25,92 @@ st.caption("store_inventory_status_step2 기준 발주 우선순위 조회 화�
 
 
 # -------------------------------------------------
-# DB 연결
+# Supabase 연결
 # -------------------------------------------------
-@st.cache_resource
-def get_engine():
-    db_url = os.getenv("DATABASE_URL")
-
-    if db_url:
-        return create_engine(db_url, pool_pre_ping=True)
-
-    host = os.getenv("PGHOST")
-    port = os.getenv("PGPORT", "5432")
-    dbname = os.getenv("PGDATABASE")
-    user = os.getenv("PGUSER")
-    password = os.getenv("PGPASSWORD")
-
-    if not all([host, dbname, user, password]):
-        raise ValueError(
-            "DB 접속 정보가 없습니다. DATABASE_URL 또는 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD를 설정하세요."
+def get_supabase_client():
+    if _create_supabase_client is None:
+        raise ImportError(
+            "supabase 패키지가 없습니다. requirements.txt에 supabase를 추가하세요."
         )
 
-    conn_str = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}?sslmode=require"
-    return create_engine(conn_str, pool_pre_ping=True)
+    url = ""
+    key = ""
+
+    try:
+        if hasattr(st, "secrets"):
+            url = str(st.secrets.get("SUPABASE_URL") or "").strip()
+            key = str(st.secrets.get("SUPABASE_KEY") or "").strip()
+
+            # 네가 올린 예시 파일처럼 [supabase] 블록도 같이 지원
+            if (not url or not key) and "supabase" in st.secrets:
+                sec = dict(st.secrets["supabase"])
+                url = str(sec.get("url") or url or "").strip()
+                key = str(
+                    sec.get("service_role_key")
+                    or sec.get("key")
+                    or sec.get("anon_key")
+                    or key
+                    or ""
+                ).strip()
+    except Exception:
+        pass
+
+    if not url:
+        url = (os.getenv("SUPABASE_URL") or "").strip()
+    if not key:
+        key = (
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_KEY")
+            or os.getenv("SUPABASE_ANON_KEY")
+            or ""
+        ).strip()
+
+    if not url or not key:
+        raise ValueError(
+            "Supabase 접속 정보가 없습니다. SUPABASE_URL, SUPABASE_KEY를 secrets 또는 환경변수에 설정하세요."
+        )
+
+    return _create_supabase_client(url, key)
+
+
+
+def fetch_supabase_table_all_rows(
+    client,
+    table_name: str,
+    batch_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    off = 0
+
+    while True:
+        try:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .limit(batch_size)
+                .offset(off)
+                .execute()
+            )
+        except Exception:
+            resp = (
+                client.table(table_name)
+                .select("*")
+                .range(off, off + batch_size - 1)
+                .execute()
+            )
+
+        chunk = resp.data if resp.data else []
+        if not chunk:
+            break
+
+        rows.extend(chunk)
+
+        if len(chunk) < batch_size:
+            break
+
+        off += batch_size
+
+    return rows
 
 
 # -------------------------------------------------
@@ -50,32 +118,53 @@ def get_engine():
 # -------------------------------------------------
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame:
-    query = text(
-        """
-        SELECT
-            id,
-            created_at,
-            style_code,
-            sku,
-            total_shortage_qty,
-            shortage_store_count,
-            lead_time,
-            reorder_needed,
-            reorder_urgency,
-            order_due_date,
-            center_stock_qty,
-            surplus_qty,
-            shortage_qty,
-            shortage_start_week
-        FROM public.store_inventory_status_step2
-        ORDER BY created_at DESC, style_code, sku
-        """
-    )
+    client = get_supabase_client()
+    rows = fetch_supabase_table_all_rows(client, "store_inventory_status_step2")
 
-    engine = get_engine()
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn)
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "created_at",
+                "style_code",
+                "sku",
+                "total_shortage_qty",
+                "shortage_store_count",
+                "lead_time",
+                "reorder_needed",
+                "reorder_urgency",
+                "order_due_date",
+                "center_stock_qty",
+                "surplus_qty",
+                "shortage_qty",
+                "shortage_start_week",
+            ]
+        )
 
+    df = pd.DataFrame(rows)
+
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df = df.sort_values(
+            by=["created_at", "style_code", "sku"],
+            ascending=[False, True, True],
+            na_position="last",
+        )
+
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_forecast_data() -> pd.DataFrame:
+    client = get_supabase_client()
+    rows = fetch_supabase_table_all_rows(client, "sku_weekly_forecast_2")
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["year_week", "sale_qty", "stage", "style_code", "sku", "plant", "week_no"]
+        )
+
+    df = pd.DataFrame(rows)
     return df
 
 
@@ -162,9 +251,50 @@ def priority_score(row: pd.Series) -> int:
 
 
 
-def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+def _to_float(value: Any) -> float:
+    x = pd.to_numeric(value, errors="coerce")
+    if pd.isna(x):
+        return 0.0
+    return float(x)
+
+
+
+def _current_iso_week() -> int:
+    return int(datetime.today().isocalendar().week)
+
+
+
+def compute_sku_metrics_from_forecast(forecast_df: pd.DataFrame, dashboard_df: pd.DataFrame) -> pd.DataFrame:
+    if forecast_df.empty:
+        return pd.DataFrame(columns=[
+            "sku",
+            "season_remaining_qty_until_maturity",
+            "recommended_order_qty_now",
+        ])
+
+    work = forecast_df.copy()
+    for col in ["sku", "style_code", "stage", "plant"]:
+        if col in work.columns:
+            work[col] = work[col].astype(str).str.strip()
+
+    if "sale_qty" in work.columns:
+        work["sale_qty"] = pd.to_numeric(work["sale_qty"], errors="coerce").fillna(0)
+    else:
+        work["sale_qty"] = 0
+
+    if "week_no" in work.columns:
+        work["week_no_num"] = pd.to_numeric(work["week_no"], errors="coerce")
+    else:
+        work["week_no_num"] = pd.NA
+
+    current_week = _current_iso_week()
+
+    step2_by_sku = dashboard_df.copy()
+    if not step2_by_sku.empty:
+        for col in ["lead_time", "total_shortage_qty", "shortage_qty"]:
+            if col in step2_by_sku.columns:
+                step2_by_sku[col] = pd.to_numeric(step2_by_sku[col], errors="coerce")
+        step2_by_sku = step2_by_sku.sort_values("created_at", ascending=Fals
 
     date_cols = ["created_at", "order_due_date"]
     for col in date_cols:
