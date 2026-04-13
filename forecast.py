@@ -616,12 +616,28 @@ def build_sku_weekly_forecast_2_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame)
     return final_df.to_dict(orient="records")
 
 
-def run_job():
+def run_job(style_codes_text: str):
     client = get_supabase_client()
 
     st.write("1. sku_weekly_forecast 불러오는 중...")
     sku_df = load_sku_weekly_forecast_df(client)
     st.write(f"sku_weekly_forecast rows: {len(sku_df):,}")
+
+    # style_code 입력값 파싱
+    style_codes = [
+        x.strip()
+        for x in str(style_codes_text).replace("\n", ",").split(",")
+        if str(x).strip()
+    ]
+
+    # style_code 필터
+    if style_codes:
+        sku_df = sku_df[sku_df["style_code"].isin(style_codes)].copy()
+        st.write(f"style_code 필터 적용 후 rows: {len(sku_df):,}")
+        st.write(f"선택된 style_code: {style_codes}")
+
+    if sku_df.empty:
+        raise ValueError("입력한 style_code에 해당하는 sku_weekly_forecast 데이터가 없습니다.")
 
     st.write("2. item_plc 불러오는 중...")
     plc_df = load_item_plc_df(client)
@@ -638,17 +654,14 @@ def run_job():
     st.write("미리보기")
     st.dataframe(preview_df.head(20), use_container_width=True)
 
-    st.write("4. 기존 sku_weekly_forecast_2 삭제 중...")
-    delete_all_rows(client, SKU_WEEKLY_FORECAST_2_TABLE, key_col="id")
-
-    st.write("5. 새 데이터 insert 중...")
+    st.write("4. 새 데이터 insert 중...")
     insert_in_chunks(client, SKU_WEEKLY_FORECAST_2_TABLE, rows, batch_size=500)
 
     actual_count = int((preview_df["is_forecast"] == False).sum())
     forecast_count = int((preview_df["is_forecast"] == True).sum())
 
     st.success(
-        f"완료: 총 {len(rows):,}건 적재 / 실제 {actual_count:,}건 / 예측 {forecast_count:,}건"
+        f"완료: 총 {len(rows):,}건 누적 적재 / 실제 {actual_count:,}건 / 예측 {forecast_count:,}건"
     )
 
 
@@ -656,8 +669,14 @@ st.set_page_config(page_title="sku_weekly_forecast_2 적재", layout="wide")
 st.title("sku_weekly_forecast_2 적재")
 st.write("sku_weekly_forecast 실제값 + item_plc 비중으로 미래 주차 예측")
 
+style_codes_text = st.text_area(
+    "적재할 style_code 입력",
+    placeholder="예:\nSPPPG25U18\nSPRPG24G51\nSPRPG24C62\n또는 SPPPG25U18, SPRPG24G51, SPRPG24C62",
+    height=120,
+)
+
 if st.button("쌓기"):
     try:
-        run_job()
+        run_job(style_codes_text)
     except Exception as e:
         st.error(f"실패: {e}")
