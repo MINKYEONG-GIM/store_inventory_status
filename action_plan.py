@@ -163,6 +163,54 @@ def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
     return ""
 
 
+def parse_style_codes(text: str) -> List[str]:
+    if not text:
+        return []
+
+    separators = [",", "\n", "\t", ";", "|"]
+    normalized = text
+    for sep in separators:
+        normalized = normalized.replace(sep, ",")
+
+    values: List[str] = []
+    seen = set()
+
+    for x in normalized.split(","):
+        v = str(x).strip()
+        if not v:
+            continue
+        if v not in seen:
+            seen.add(v)
+            values.append(v)
+
+    return values
+
+
+def filter_rows_by_style_codes(
+    rows: List[Dict[str, Any]],
+    style_codes: List[str],
+) -> List[Dict[str, Any]]:
+    if not rows or not style_codes:
+        return rows
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return rows
+
+    style_col = _first_existing_col(df, ["style_code", "style", "STYLE_CODE"])
+    if not style_col:
+        return rows
+
+    wanted = {str(x).strip() for x in style_codes if str(x).strip()}
+    if not wanted:
+        return rows
+
+    df[style_col] = df[style_col].fillna("").astype(str).str.strip()
+    df = df[df[style_col].isin(wanted)].copy()
+
+    return df.to_dict(orient="records")
+
+
 def _weekly_loss_source_col(weekly_df: pd.DataFrame) -> str:
     """
     weekly_stock에서 주간 loss에 해당하는 컬럼명.
@@ -614,7 +662,10 @@ def build_step2_rows(
     return out
 
 
-def load_step2() -> Dict[str, Any]:
+def load_step2(
+    style_codes: Optional[List[str]] = None,
+    replace_mode: bool = True,
+) -> Dict[str, Any]:
     client = get_supabase_client()
     if client is None:
         raise RuntimeError("Supabase 연결 불가: SUPABASE_URL / SUPABASE_KEY 설정을 확인하세요.")
@@ -632,11 +683,19 @@ def load_step2() -> Dict[str, Any]:
     raw_file_rows = fetch_supabase_table_all_rows(client, raw_file_table)
     forecast_rows = fetch_supabase_table_all_rows(client, forecast_table)
 
+    if style_codes:
+        step1_rows = filter_rows_by_style_codes(step1_rows, style_codes)
+        center_rows = filter_rows_by_style_codes(center_rows, style_codes)
+        weekly_rows = filter_rows_by_style_codes(weekly_rows, style_codes)
+        raw_file_rows = filter_rows_by_style_codes(raw_file_rows, style_codes)
+        forecast_rows = filter_rows_by_style_codes(forecast_rows, style_codes)
+
     result_rows = build_step2_rows(
         step1_rows, center_rows, weekly_rows, raw_file_rows, forecast_rows
     )
 
-    clear_table_all_rows(client, step2_table)
+    if replace_mode:
+        clear_table_all_rows(client, step2_table)
     inserted = bulk_insert_rows(client, step2_table, result_rows)
 
     sample = []
@@ -663,6 +722,7 @@ def load_step2() -> Dict[str, Any]:
         "forecast_rows": len(forecast_rows),
         "inserted_rows": inserted,
         "sample_rows": sample,
+        "replace_mode": replace_mode,
     }
 
 
@@ -685,21 +745,52 @@ def main():
         unsafe_allow_html=True,
     )
 
-    if st.button("데이터 쌓기", use_container_width=True):
+    style_code_text = st.text_area(
+        "적재할 style_code 입력",
+        placeholder="예:\nSPPPG25U01\nSPRPG24G51\nSPRPG24C62\n\n쉼표(,)나 줄바꿈으로 여러 개 입력 가능",
+        height=120,
+    )
+    style_codes = parse_style_codes(style_code_text)
+    if style_codes:
+        st.caption(f"선택된 style_code {len(style_codes)}개")
+
+    col1, col2 = st.columns(2)
+
+    append_clicked = col1.button("누적해서 쌓기", use_container_width=True)
+    replace_clicked = col2.button("기존 데이터 삭제 후 쌓기", use_container_width=True)
+
+    if append_clicked or replace_clicked:
         try:
+            replace_mode = replace_clicked
+
             with st.spinner("적재 중..."):
-                r = load_step2()
-            st.success(
-                f"완료: step1 {r['step1_rows']:,}행, "
-                f"center {r['center_rows']:,}행 기준, "
-                f"weekly {r['weekly_rows']:,}행 기준, "
-                f"RAW FILE {r.get('raw_file_rows', 0):,}행, "
-                f"forecast {r.get('forecast_rows', 0):,}행 기준, "
-                f"step2 {r['inserted_rows']:,}행 저장"
-            )
+                r = load_step2(
+                    style_codes=style_codes,
+                    replace_mode=replace_mode,
+                )
+
+            mode_text = "기존 데이터 삭제 후 적재" if replace_mode else "누적 적재"
+
+            if style_codes:
+                st.success(
+                    f"{mode_text} 완료: 선택한 style_code {len(style_codes)}개 기준 "
+                    f"step2 {r['inserted_rows']:,}행 저장"
+                )
+            else:
+                st.success(
+                    f"{mode_text} 완료: "
+                    f"step1 {r['step1_rows']:,}행, "
+                    f"center {r['center_rows']:,}행, "
+                    f"weekly {r['weekly_rows']:,}행, "
+                    f"RAW FILE {r.get('raw_file_rows', 0):,}행, "
+                    f"forecast {r.get('forecast_rows', 0):,}행 기준 "
+                    f"step2 {r['inserted_rows']:,}행 저장"
+                )
+
             if r.get("sample_rows"):
                 st.markdown("**적재 결과 샘플(최대 10행)**")
                 st.dataframe(pd.DataFrame(r["sample_rows"]), use_container_width=True)
+
         except Exception as e:
             show_detailed_exception(e, title="적재 실패")
 
