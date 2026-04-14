@@ -387,8 +387,9 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     BASE_STOCK_QTY / loss를 다시 계산한다.
 
     변경 규칙
-    - loss = max(0, sale_qty - 전주 BASE_STOCK_QTY)  (재고 초과분만 loss)
-    - BASE_STOCK_QTY는 전주 재고에서 sale_qty 차감(최소 0)하여 계산
+    - 사용 가능 재고 = 전주 남은 재고 + 이번주 IPGO_QTY
+    - loss = max(0, sale_qty - 사용 가능 재고)
+    - BASE_STOCK_QTY = max(0, 사용 가능 재고 - sale_qty)
     """
     if final_df.empty:
         return final_df
@@ -397,6 +398,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     work["week_no"] = pd.to_numeric(work["week_no"], errors="coerce")
     work["sale_qty"] = pd.to_numeric(work["sale_qty"], errors="coerce").fillna(0)
     work["BASE_STOCK_QTY"] = pd.to_numeric(work["BASE_STOCK_QTY"], errors="coerce")
+    work["IPGO_QTY"] = pd.to_numeric(work["IPGO_QTY"], errors="coerce").fillna(0)
     work["is_forecast"] = work["is_forecast"].apply(to_bool)
 
     work = work.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
@@ -412,25 +414,33 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
         for idx, row in g.iterrows():
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
+            ipgo_qty = pd.to_numeric(row.get("IPGO_QTY"), errors="coerce")
             if pd.isna(sale_qty):
                 sale_qty = 0.0
+            if pd.isna(ipgo_qty):
+                ipgo_qty = 0.0
             sale_qty = float(sale_qty)
+            ipgo_qty = float(ipgo_qty)
 
             # 첫 행은 원본 BASE_STOCK_QTY를 시작값으로 사용
             if prev_base is None:
                 prev_base = 0.0 if pd.isna(current_base) else float(current_base)
 
-            # 현재 주차 loss 계산 (재고 초과분만)
-            curr_loss = max(0.0, sale_qty - prev_base)
+            # 이번 주 판매 전에 입고 반영
+            available_stock = prev_base + ipgo_qty
 
-            # 이번 주 재고 계산
-            remain = prev_base - sale_qty
+            # loss 계산
+            curr_loss = max(0.0, sale_qty - available_stock)
+
+            # 이번 주 종료 재고
+            remain = available_stock - sale_qty
             if remain < 0:
                 remain = 0.0
 
             new_base[idx] = int(round(remain))
             new_loss[idx] = int(round(curr_loss))
 
+            # 다음 주 전주재고로 넘김
             prev_base = remain
 
     work["BASE_STOCK_QTY"] = new_base
