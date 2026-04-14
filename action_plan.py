@@ -114,17 +114,6 @@ def get_weekly_stock_table_name() -> str:
     return (os.getenv("SUPABASE_WEEKLY_STOCK_TABLE") or "weekly_stock").strip()
 
 
-def get_raw_file_table_name() -> str:
-    try:
-        if hasattr(st, "secrets") and "supabase" in st.secrets:
-            v = st.secrets["supabase"].get("raw_file_table")
-            if v is not None and str(v).strip():
-                return str(v).strip()
-    except Exception:
-        pass
-    return (os.getenv("SUPABASE_RAW_FILE_TABLE") or "RAW FILE").strip()
-
-
 def get_sku_weekly_forecast_2_table_name() -> str:
     try:
         if hasattr(st, "secrets") and "supabase" in st.secrets:
@@ -503,7 +492,6 @@ def build_step2_rows(
     step1_rows: List[Dict[str, Any]],
     center_rows: List[Dict[str, Any]],
     weekly_rows: List[Dict[str, Any]],
-    raw_file_rows: Optional[List[Dict[str, Any]]] = None,
     forecast_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if not step1_rows:
@@ -579,25 +567,26 @@ def build_step2_rows(
 
     shortage_week_agg = build_shortage_start_week_map(weekly_rows, center_rows)
 
-    raw_start_agg = pd.DataFrame(columns=["sku", "sale_start_date"])
-    if raw_file_rows:
-        raw_df = pd.DataFrame(raw_file_rows)
+    sale_start_agg = pd.DataFrame(columns=["sku", "sale_start_date"])
+    if forecast_rows:
+        forecast_df = pd.DataFrame(forecast_rows)
 
-        raw_sku_col = _first_existing_col(raw_df, ["sku", "SKU"])
-        raw_calday_col = _first_existing_col(raw_df, ["CALDAY"])
+        forecast_sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
+        forecast_year_week_col = _first_existing_col(forecast_df, ["year_week", "YEAR_WEEK"])
+        forecast_sale_qty_col = _first_existing_col(forecast_df, ["SALE_QTY", "sale_qty"])
 
-        if raw_sku_col and raw_calday_col:
-            raw_df["sku_norm"] = raw_df[raw_sku_col].fillna("").astype(str).str.strip()
-            raw_df = raw_df[raw_df["sku_norm"] != ""].copy()
+        if forecast_sku_col and forecast_year_week_col and forecast_sale_qty_col:
+            forecast_df["sku_norm"] = forecast_df[forecast_sku_col].fillna("").astype(str).str.strip()
+            forecast_df = forecast_df[forecast_df["sku_norm"] != ""].copy()
 
-            raw_df["sale_start_date"] = pd.to_datetime(
-                raw_df[raw_calday_col].astype(str),
-                format="%Y%m%d",
-                errors="coerce",
-            )
+            forecast_df["sale_qty_num"] = forecast_df[forecast_sale_qty_col].apply(_to_float)
+            forecast_df["sale_start_date"] = forecast_df[forecast_year_week_col].apply(_year_week_to_week_start)
 
-            raw_start_agg = (
-                raw_df.dropna(subset=["sale_start_date"])
+            sale_start_agg = (
+                forecast_df[
+                    (forecast_df["sale_qty_num"] >= 1) &
+                    (forecast_df["sale_start_date"].notna())
+                ]
                 .groupby("sku_norm", as_index=False)
                 .agg(sale_start_date=("sale_start_date", "min"))
                 .rename(columns={"sku_norm": "sku"})
@@ -605,35 +594,10 @@ def build_step2_rows(
 
     forecast_sale_agg = _forecast_total_sale_agg(forecast_rows or [])
 
-    sale_end_agg = pd.DataFrame(columns=["sku", "sale_end_date"])
-    if forecast_rows:
-        forecast_df = pd.DataFrame(forecast_rows)
-
-        forecast_sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
-        forecast_stage_col = _first_existing_col(forecast_df, ["stage", "STAGE"])
-        forecast_year_week_col = _first_existing_col(forecast_df, ["year_week", "YEAR_WEEK"])
-
-        if forecast_sku_col and forecast_stage_col and forecast_year_week_col:
-            forecast_df["sku_norm"] = forecast_df[forecast_sku_col].fillna("").astype(str).str.strip()
-            forecast_df["stage_norm"] = forecast_df[forecast_stage_col].fillna("").astype(str).str.strip()
-            forecast_df["sale_end_date"] = forecast_df[forecast_year_week_col].apply(_year_week_to_week_start)
-
-            sale_end_agg = (
-                forecast_df[
-                    (forecast_df["sku_norm"] != "") &
-                    (forecast_df["stage_norm"] == "쇠퇴") &
-                    (forecast_df["sale_end_date"].notna())
-                ]
-                .groupby("sku_norm", as_index=False)
-                .agg(sale_end_date=("sale_end_date", "min"))
-                .rename(columns={"sku_norm": "sku"})
-            )
-
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
-    merged = merged.merge(raw_start_agg, how="left", on="sku")
+    merged = merged.merge(sale_start_agg, how="left", on="sku")
     merged = merged.merge(forecast_sale_agg, how="left", on="sku")
-    merged = merged.merge(sale_end_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
     if "total_sale_qty" in merged.columns:
         merged["total_sale_qty"] = merged["total_sale_qty"].fillna(0.0)
@@ -697,12 +661,6 @@ def build_step2_rows(
         else:
             sale_start_date_value = pd.Timestamp(sale_start_raw).normalize().date().isoformat()
 
-        sale_end_raw = r.get("sale_end_date")
-        if pd.isna(sale_end_raw):
-            sale_end_date_value: Optional[str] = None
-        else:
-            sale_end_date_value = pd.Timestamp(sale_end_raw).normalize().date().isoformat()
-
         style_for_monthly = str(r["style_code"]).strip() if str(r["style_code"]).strip() else ""
         monthly_code = style_for_monthly[6] if len(style_for_monthly) >= 7 else ""
 
@@ -723,7 +681,6 @@ def build_step2_rows(
                 "total_reorder_amount": total_reorder_amount,
                 "due_date_reorder_amount": due_date_reorder_amount,
                 "sale_start_date": sale_start_date_value,
-                "sale_end_date": sale_end_date_value,
                 "total_sale_qty": float(_to_float(r.get("total_sale_qty"))),
                 "monthly_code": monthly_code,
             }
@@ -744,25 +701,22 @@ def load_step2(
     step1_table = get_step1_table_name()
     center_table = get_center_stock_table_name()
     weekly_table = get_weekly_stock_table_name()
-    raw_file_table = get_raw_file_table_name()
     forecast_table = get_sku_weekly_forecast_table_name()
     step2_table = get_step2_table_name()
 
     step1_rows = fetch_supabase_table_all_rows(client, step1_table)
     center_rows = fetch_supabase_table_all_rows(client, center_table)
     weekly_rows = fetch_supabase_table_all_rows(client, weekly_table)
-    raw_file_rows = fetch_supabase_table_all_rows(client, raw_file_table)
     forecast_rows = fetch_supabase_table_all_rows(client, forecast_table)
 
     if style_codes:
         step1_rows = filter_rows_by_style_codes(step1_rows, style_codes)
         center_rows = filter_rows_by_style_codes(center_rows, style_codes)
         weekly_rows = filter_rows_by_style_codes(weekly_rows, style_codes)
-        raw_file_rows = filter_rows_by_style_codes(raw_file_rows, style_codes)
         forecast_rows = filter_rows_by_style_codes(forecast_rows, style_codes)
 
     result_rows = build_step2_rows(
-        step1_rows, center_rows, weekly_rows, raw_file_rows, forecast_rows
+        step1_rows, center_rows, weekly_rows, forecast_rows
     )
 
     if replace_mode:
@@ -776,7 +730,7 @@ def load_step2(
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
                 "reorder_urgency, center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
-                "sale_start_date, sale_end_date, total_sale_qty, monthly_code"
+                "sale_start_date, total_sale_qty, monthly_code"
             )
             .limit(10)
             .execute()
@@ -789,7 +743,6 @@ def load_step2(
         "step1_rows": len(step1_rows),
         "center_rows": len(center_rows),
         "weekly_rows": len(weekly_rows),
-        "raw_file_rows": len(raw_file_rows),
         "forecast_rows": len(forecast_rows),
         "inserted_rows": inserted,
         "sample_rows": sample,
@@ -853,7 +806,6 @@ def main():
                     f"step1 {r['step1_rows']:,}행, "
                     f"center {r['center_rows']:,}행, "
                     f"weekly {r['weekly_rows']:,}행, "
-                    f"RAW FILE {r.get('raw_file_rows', 0):,}행, "
                     f"forecast {r.get('forecast_rows', 0):,}행 기준 "
                     f"step2 {r['inserted_rows']:,}행 저장"
                 )
