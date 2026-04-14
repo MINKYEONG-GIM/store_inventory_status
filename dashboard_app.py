@@ -627,7 +627,7 @@ def render_style_table(style_df: pd.DataFrame) -> Optional[str]:
                 "성숙기까지 예상판매수량 합계",
                 "1차리오더 권장량",
                 "현 센터재고량",
-                "1차 발주기한",
+                "가장 이른 발주기한",
             ]
         ],
         use_container_width=True,
