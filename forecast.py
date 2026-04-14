@@ -386,15 +386,10 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     plant, sku별로 week_no 오름차순으로 돌면서
     BASE_STOCK_QTY / loss를 다시 계산한다.
 
-    규칙
-    - is_forecast == False -> loss = 0
-    - is_forecast == True
-        - sale_qty > 직전 주의 BASE_STOCK_QTY 이면
-          loss = sale_qty - 직전 주의 BASE_STOCK_QTY
-          BASE_STOCK_QTY = 0
-        - 아니면
-          loss = 0
-          BASE_STOCK_QTY = 직전 주의 BASE_STOCK_QTY - sale_qty
+    변경 규칙
+    - loss는 sale_qty만큼 주차별 누적 증가
+    - 즉, 이번 주 loss = 전주 loss + 이번 주 sale_qty
+    - BASE_STOCK_QTY는 전주 재고에서 sale_qty 차감하여 계산
     """
     if final_df.empty:
         return final_df
@@ -414,43 +409,32 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values("week_no", na_position="last")
 
         prev_base = None
+        prev_loss = 0.0
 
         for idx, row in g.iterrows():
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
             if pd.isna(sale_qty):
-                sale_qty = 0
+                sale_qty = 0.0
             sale_qty = float(sale_qty)
-
-            is_forecast = to_bool(row.get("is_forecast"))
 
             # 첫 행은 원본 BASE_STOCK_QTY를 시작값으로 사용
             if prev_base is None:
                 prev_base = 0.0 if pd.isna(current_base) else float(current_base)
 
-            if not is_forecast:
-                # 실제행은 loss 무조건 0
-                new_base[idx] = int(round(prev_base))
-                new_loss[idx] = 0
+            # 이번 주 loss는 전주 loss + 이번 주 sale_qty
+            curr_loss = prev_loss + sale_qty
 
-                # 다음 주 계산용 재고는 이번 주 재고 - 이번 주 판매량
-                remain = prev_base - sale_qty
-                if remain < 0:
-                    remain = 0.0
-                prev_base = remain
+            # 이번 주 재고 계산
+            remain = prev_base - sale_qty
+            if remain < 0:
+                remain = 0.0
 
-            else:
-                # 예측행은 전주 남은 재고 기준으로 계산
-                if sale_qty > prev_base:
-                    loss = sale_qty - prev_base
-                    remain = 0.0
-                else:
-                    loss = 0.0
-                    remain = prev_base - sale_qty
+            new_base[idx] = int(round(remain))
+            new_loss[idx] = int(round(curr_loss))
 
-                new_base[idx] = int(round(remain))
-                new_loss[idx] = int(round(loss))
-                prev_base = remain
+            prev_base = remain
+            prev_loss = curr_loss
 
     work["BASE_STOCK_QTY"] = new_base
     work["loss"] = new_loss
