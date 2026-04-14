@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("SKU 발주 현황 대시보드")
-st.caption("store_inventory_status_step2 기준 발주 우선순위 조회 화면")
+st.caption("상단은 스타일별 요약, 하단은 선택한 스타일의 SKU 상세 조회 화면")
 
 
 # -------------------------------------------------
@@ -440,6 +440,59 @@ def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = No
     return df
 
 
+def build_style_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "style_code",
+                "sku_count",
+                "style_total_sale_qty",
+                "style_season_remaining_qty",
+                "style_recommended_order_qty",
+                "style_shortage_qty",
+                "style_center_stock_qty",
+                "style_reorder_needed_count",
+                "latest_order_due_date",
+            ]
+        )
+
+    work = df.copy()
+    work["reorder_needed_bool"] = work["reorder_needed"].apply(normalize_boolean)
+
+    grouped = (
+        work.groupby("style_code", dropna=False)
+        .agg(
+            sku_count=("sku", lambda x: x.astype(str).nunique()),
+            style_total_sale_qty=("total_sale_qty", "sum"),
+            style_season_remaining_qty=("season_remaining_qty_until_maturity", "sum"),
+            style_recommended_order_qty=("recommended_order_qty_now", "sum"),
+            style_shortage_qty=("shortage_qty", "sum"),
+            style_center_stock_qty=("center_stock_qty", "sum"),
+            style_reorder_needed_count=("reorder_needed_bool", "sum"),
+            latest_order_due_date=("order_due_date", "min"),
+        )
+        .reset_index()
+    )
+
+    grouped["latest_order_due_date"] = pd.to_datetime(
+        grouped["latest_order_due_date"], errors="coerce"
+    )
+
+    grouped["style_priority"] = (
+        grouped["style_recommended_order_qty"].fillna(0)
+        + grouped["style_shortage_qty"].fillna(0)
+        + grouped["style_reorder_needed_count"].fillna(0) * 1000
+    )
+
+    grouped = grouped.sort_values(
+        by=["style_priority", "latest_order_due_date", "style_code"],
+        ascending=[False, True, True],
+        na_position="last",
+    )
+
+    return grouped
+
+
 # -------------------------------------------------
 # 사이드바 필터
 # -------------------------------------------------
@@ -539,6 +592,59 @@ def render_kpis(df: pd.DataFrame):
 
 
 # -------------------------------------------------
+# 스타일 요약
+# -------------------------------------------------
+def render_style_table(style_df: pd.DataFrame) -> Optional[str]:
+    st.subheader("스타일별 요약")
+
+    if style_df.empty:
+        st.info("표시할 스타일 요약 데이터가 없습니다.")
+        return None
+
+    view_df = style_df.copy()
+    view_df["latest_order_due_date"] = view_df["latest_order_due_date"].dt.strftime("%Y-%m-%d")
+
+    display_df = view_df.rename(
+        columns={
+            "style_code": "스타일코드",
+            "sku_count": "SKU 수",
+            "style_total_sale_qty": "판매량 합계",
+            "style_season_remaining_qty": "성숙기까지 예상판매수량 합계",
+            "style_recommended_order_qty": "권장 발주량 합계",
+            "style_shortage_qty": "부족수량 합계",
+            "style_center_stock_qty": "센터재고 합계",
+            "style_reorder_needed_count": "발주 필요 SKU 수",
+            "latest_order_due_date": "가장 이른 발주기한",
+        }
+    )
+
+    st.dataframe(
+        display_df[
+            [
+                "스타일코드",
+                "SKU 수",
+                "판매량 합계",
+                "성숙기까지 예상판매수량 합계",
+                "권장 발주량 합계",
+                "부족수량 합계",
+                "센터재고 합계",
+                "발주 필요 SKU 수",
+                "가장 이른 발주기한",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    style_options = view_df["style_code"].dropna().astype(str).tolist()
+    selected_style = st.selectbox(
+        "상세 확인할 스타일 선택",
+        options=style_options,
+    )
+    return selected_style
+
+
+# -------------------------------------------------
 # 메인 화면
 # -------------------------------------------------
 def render_main_table(df: pd.DataFrame):
@@ -569,7 +675,6 @@ def render_main_table(df: pd.DataFrame):
 
     view_df = view_df[list(display_columns.keys())].rename(columns=display_columns)
 
-    st.subheader("발주 대상 목록")
     st.dataframe(
         view_df,
         use_container_width=True,
@@ -676,14 +781,27 @@ def main():
     render_kpis(filtered_df)
     st.divider()
 
-    tab1, tab2 = st.tabs(["전체 목록", "상세 보기"])
+    style_summary_df = build_style_summary(filtered_df)
+    selected_style = render_style_table(style_summary_df)
+    st.divider()
+
+    if selected_style:
+        style_filtered_df = filtered_df[
+            filtered_df["style_code"].astype(str) == str(selected_style)
+        ].copy()
+    else:
+        style_filtered_df = filtered_df.copy()
+
+    st.subheader("SKU 상세 목록")
+
+    tab1, tab2 = st.tabs(["SKU 목록", "SKU 상세 보기"])
 
     with tab1:
-        render_main_table(filtered_df)
-        render_download(filtered_df)
+        render_main_table(style_filtered_df)
+        render_download(style_filtered_df)
 
     with tab2:
-        render_detail_panel(filtered_df)
+        render_detail_panel(style_filtered_df)
 
     with st.expander("판정 기준 설명"):
         st.markdown(
