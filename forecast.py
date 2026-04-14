@@ -387,9 +387,8 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     BASE_STOCK_QTY / loss를 다시 계산한다.
 
     변경 규칙
-    - loss는 sale_qty만큼 주차별 누적 증가
-    - 즉, 이번 주 loss = 전주 loss + 이번 주 sale_qty
-    - BASE_STOCK_QTY는 전주 재고에서 sale_qty 차감하여 계산
+    - loss = max(0, sale_qty - 전주 BASE_STOCK_QTY)  (재고 초과분만 loss)
+    - BASE_STOCK_QTY는 전주 재고에서 sale_qty 차감(최소 0)하여 계산
     """
     if final_df.empty:
         return final_df
@@ -409,7 +408,6 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values("week_no", na_position="last")
 
         prev_base = None
-        prev_loss = 0.0
 
         for idx, row in g.iterrows():
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
@@ -422,8 +420,8 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             if prev_base is None:
                 prev_base = 0.0 if pd.isna(current_base) else float(current_base)
 
-            # 이번 주 loss는 전주 loss + 이번 주 sale_qty
-            curr_loss = prev_loss + sale_qty
+            # 현재 주차 loss 계산 (재고 초과분만)
+            curr_loss = max(0.0, sale_qty - prev_base)
 
             # 이번 주 재고 계산
             remain = prev_base - sale_qty
@@ -434,7 +432,6 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             new_loss[idx] = int(round(curr_loss))
 
             prev_base = remain
-            prev_loss = curr_loss
 
     work["BASE_STOCK_QTY"] = new_base
     work["loss"] = new_loss
