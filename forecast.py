@@ -590,7 +590,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "is_forecast": True,
             "loss": to_int_or_none(r.get("loss")),
-            "IPGO_QTY": to_int_or_none(r.get("IPGO_QTY")),
+            "IPGO_QTY": 0,
             "shape_type": None if pd.isna(r.get("shape_type")) or str(r.get("shape_type")).strip() == "" else str(r.get("shape_type")).strip(),
             "week_no": to_int_or_none(r.get("week_no")),
         })
