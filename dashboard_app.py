@@ -608,11 +608,10 @@ def render_style_table(style_df: pd.DataFrame) -> Optional[str]:
         columns={
             "style_code": "스타일코드",
             "sku_count": "SKU 수",
-            "style_total_sale_qty": "판매량 합계",
+            "style_total_sale_qty": "기판매량",
             "style_season_remaining_qty": "성숙기까지 예상판매수량 합계",
-            "style_recommended_order_qty": "권장 발주량 합계",
-            "style_shortage_qty": "부족수량 합계",
-            "style_center_stock_qty": "센터재고 합계",
+            "style_recommended_order_qty": "1차리오더 권장량",
+            "style_center_stock_qty": "현 센터재고량",
             "style_reorder_needed_count": "발주 필요 SKU 수",
             "latest_order_due_date": "가장 이른 발주기한",
         }
@@ -623,13 +622,12 @@ def render_style_table(style_df: pd.DataFrame) -> Optional[str]:
             [
                 "스타일코드",
                 "SKU 수",
-                "판매량 합계",
-                "성숙기까지 예상판매수량 합계",
-                "권장 발주량 합계",
-                "부족수량 합계",
-                "센터재고 합계",
                 "발주 필요 SKU 수",
-                "가장 이른 발주기한",
+                "기판매량",
+                "성숙기까지 예상판매수량 합계",
+                "1차리오더 권장량",
+                "현 센터재고량",
+                "1차 발주기한",
             ]
         ],
         use_container_width=True,
