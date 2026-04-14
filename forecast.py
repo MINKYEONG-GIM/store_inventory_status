@@ -564,17 +564,11 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
     # 미래 주차별 item_plc 비중 붙이기
     expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
 
-    # item_code별 미래 주차 ratio 합계
-    future_ratio_sum = (
-        expanded.groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
-        .agg(future_ratio_sum=("last_year_ratio_pct", "sum"))
-    )
-
-    expanded = expanded.merge(
-        future_ratio_sum,
-        on=["item_code", "style_code", "sku", "plant"],
-        how="left"
-    )
+    # 누적 판매량이 0일 때 사용할 "다다음주" 기준 주차
+    fallback_week_no = curr_week + 2
+    if fallback_week_no > 52:
+        fallback_week_no = 52
+    expanded["fallback_week_no"] = fallback_week_no
 
     # 현재까지 실제 판매량
     actual_summary = (
@@ -589,21 +583,105 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         how="left"
     )
 
+    # 현재까지(실제 주차 기준) ratio 합계 계산용
+    ratio_base = make_full_weeks_for_base(base_keys, target_year)
+    ratio_base["week_no"] = pd.to_numeric(ratio_base["week_no"], errors="coerce")
+    ratio_base = attach_plc_fields_by_itemcode_weekno(ratio_base, plc_year)
+
+    # 전체 52주 ratio 합계
+    total_ratio_df = (
+        ratio_base.groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
+        .agg(total_ratio_sum=("last_year_ratio_pct", "sum"))
+    )
+
+    # 현재 주차까지 ratio 합계
+    elapsed_ratio_df = (
+        ratio_base[ratio_base["week_no"] <= curr_week]
+        .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
+        .agg(elapsed_ratio_sum=("last_year_ratio_pct", "sum"))
+    )
+
+    # 다다음주 ratio
+    fallback_ratio_df = ratio_base.rename(columns={
+        "week_no": "fallback_week_no",
+        "last_year_ratio_pct": "fallback_week_ratio"
+    })[["item_code", "style_code", "sku", "plant", "fallback_week_no", "fallback_week_ratio"]].copy()
+
+    expanded = expanded.merge(
+        total_ratio_df,
+        on=["item_code", "style_code", "sku", "plant"],
+        how="left"
+    )
+
+    expanded = expanded.merge(
+        elapsed_ratio_df,
+        on=["item_code", "style_code", "sku", "plant"],
+        how="left"
+    )
+
+    expanded = expanded.merge(
+        fallback_ratio_df,
+        on=["item_code", "style_code", "sku", "plant", "fallback_week_no"],
+        how="left"
+    )
+
     def calc_forecast_sale(row):
         actual_sale_cum = pd.to_numeric(row.get("actual_sale_cum"), errors="coerce")
-        future_ratio_sum = pd.to_numeric(row.get("future_ratio_sum"), errors="coerce")
+        elapsed_ratio_sum = pd.to_numeric(row.get("elapsed_ratio_sum"), errors="coerce")
+        total_ratio_sum = pd.to_numeric(row.get("total_ratio_sum"), errors="coerce")
         week_ratio = pd.to_numeric(row.get("last_year_ratio_pct"), errors="coerce")
+        fallback_week_no = pd.to_numeric(row.get("fallback_week_no"), errors="coerce")
+        fallback_week_ratio = pd.to_numeric(row.get("fallback_week_ratio"), errors="coerce")
+        week_no = pd.to_numeric(row.get("week_no"), errors="coerce")
 
         if pd.isna(actual_sale_cum):
-            actual_sale_cum = 0
+            actual_sale_cum = 0.0
 
-        if pd.isna(future_ratio_sum) or pd.isna(week_ratio):
-            return None
+        if pd.isna(week_ratio):
+            return 0
 
-        if future_ratio_sum <= 0:
-            return None
+        # 1) 누적 판매량이 0보다 크면 정상 로직
+        if actual_sale_cum > 0:
+            if pd.isna(elapsed_ratio_sum) or pd.isna(total_ratio_sum):
+                return 0
+            if elapsed_ratio_sum <= 0 or total_ratio_sum <= 0:
+                return 0
 
-        raw = float(actual_sale_cum) * (float(week_ratio) / float(future_ratio_sum))
+            # 현재까지 실제 판매량을 기준으로 올해 총판매량 추정
+            estimated_total_sale = float(actual_sale_cum) / (
+                float(elapsed_ratio_sum) / float(total_ratio_sum)
+            )
+
+            # 해당 미래 주차 판매량 = 추정 연간 총판매량 * 해당 주차 비중
+            raw = estimated_total_sale * (float(week_ratio) / float(total_ratio_sum))
+
+            if raw < 0:
+                raw = 0.0
+
+            return int(round(raw))
+
+        # 2) 누적 판매량이 0이면 fallback 로직
+        if pd.isna(fallback_week_no) or pd.isna(week_no):
+            return 0
+
+        fallback_week_no = int(fallback_week_no)
+
+        # 다음주는 0 유지
+        if week_no < fallback_week_no:
+            return 0
+
+        # 다다음주는 1장 강제
+        if week_no == fallback_week_no:
+            return 1
+
+        # 그 이후는 다다음주 비중 대비 배수 계산
+        if pd.isna(fallback_week_ratio) or fallback_week_ratio <= 0:
+            return 1
+
+        raw = float(week_ratio) / float(fallback_week_ratio)
+        if raw < 1:
+            raw = 1
+
         return int(round(raw))
 
     expanded["sale_qty"] = expanded.apply(calc_forecast_sale, axis=1)
