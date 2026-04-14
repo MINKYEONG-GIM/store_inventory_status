@@ -400,10 +400,10 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
         return final_df
 
     work = final_df.copy()
-    work["week_no"] = pd.to_numeric(work.get("week_no"), errors="coerce")
-    work["sale_qty"] = pd.to_numeric(work.get("sale_qty"), errors="coerce").fillna(0)
-    work["BASE_STOCK_QTY"] = pd.to_numeric(work.get("BASE_STOCK_QTY"), errors="coerce")
-    work["is_forecast"] = work.get("is_forecast").apply(to_bool)
+    work["week_no"] = pd.to_numeric(work["week_no"], errors="coerce")
+    work["sale_qty"] = pd.to_numeric(work["sale_qty"], errors="coerce").fillna(0)
+    work["BASE_STOCK_QTY"] = pd.to_numeric(work["BASE_STOCK_QTY"], errors="coerce")
+    work["is_forecast"] = work["is_forecast"].apply(to_bool)
 
     work = work.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
 
@@ -412,13 +412,14 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
 
     for _, g in work.groupby(["sku", "plant"], sort=False):
         g = g.sort_values("week_no", na_position="last")
+
         prev_base = None
 
         for idx, row in g.iterrows():
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
             if pd.isna(sale_qty):
-                sale_qty = 0.0
+                sale_qty = 0
             sale_qty = float(sale_qty)
 
             is_forecast = to_bool(row.get("is_forecast"))
@@ -437,6 +438,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
                 if remain < 0:
                     remain = 0.0
                 prev_base = remain
+
             else:
                 # 예측행은 전주 남은 재고 기준으로 계산
                 if sale_qty > prev_base:
@@ -452,6 +454,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
 
     work["BASE_STOCK_QTY"] = new_base
     work["loss"] = new_loss
+
     return work
 
 
@@ -620,7 +623,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),  # 시작값만 들고 감 (전체 누적 계산에서 재산정)
+            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),  # 시작값만 들고 감
             "is_forecast": True,
             "loss": 0,
             "IPGO_QTY": 0,
@@ -646,7 +649,7 @@ def build_sku_weekly_forecast_2_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame)
 
     final_df = final_df.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
 
-    # 전체 행 기준으로 다시 누적 계산 (실제+예측 연결)
+    # 전체 행 기준으로 다시 누적 계산
     final_df = apply_base_stock_and_loss(final_df)
 
     return final_df.to_dict(orient="records")
