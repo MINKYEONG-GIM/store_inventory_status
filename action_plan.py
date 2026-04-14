@@ -643,20 +643,40 @@ def build_step2_rows(
         center_stock_qty = _to_float(r["center_stock_qty"])
         lead_time = int(math.ceil(max(0.0, _to_float(r["lead_time"]))))
 
+        sku_key = str(r["sku"]).strip()
+
+        # due_date_reorder_amount: (리드타임 + 4주) 동안 예상 판매량 = required_qty (lead_time/7 + 4) * 주간 평균 loss
+        due_date_reorder_amount: Optional[int] = None
+        if sku_key in avg_weekly_loss_by_sku.index and pd.notna(avg_weekly_loss_by_sku[sku_key]):
+            avg_w = float(avg_weekly_loss_by_sku[sku_key])
+            weeks_cover = (float(lead_time) / 7.0) + 4.0
+            due_date_reorder_amount = int(round(max(0.0, weeks_cover * avg_w)))
+
+        required_qty = due_date_reorder_amount
+        after_surplus_qty = shortage_qty - surplus_qty
         remain_qty = shortage_qty - surplus_qty - center_stock_qty
         current_shortage_qty = max(0, int(math.ceil(remain_qty)))
-        reorder_needed = remain_qty > 0
 
         if shortage_qty <= 0:
             reorder_urgency = "불필요"
-        elif remain_qty <= 0:
-            reorder_urgency = "센터출고"
+            reorder_needed = False
         else:
-            reorder_urgency = "발주필요"
+            status_parts: List[str] = []
+            # 우선순위 표기: 센터출고 → 회전(매장간이동) → 발주필요
+            if center_stock_qty > 5:
+                status_parts.append("센터출고")
+            if after_surplus_qty <= 0:
+                status_parts.append("회전")
+            need_po = remain_qty > 0
+            if required_qty is not None:
+                need_po = need_po or (center_stock_qty < float(required_qty))
+            if need_po:
+                status_parts.append("발주필요")
+
+            reorder_urgency = "/".join(status_parts) if status_parts else "불필요"
+            reorder_needed = bool(need_po)
 
         shortage_start_week = pd.to_datetime(r.get("shortage_start_week"), errors="coerce")
-
-        sku_key = str(r["sku"]).strip()
 
         # total_reorder_amount: 부족 시작 주 이후 weekly_stock.loss 합(데이터에 있는 구간 = 성숙기까지 예측 판매 프록시)
         total_reorder_amount: Optional[int] = None
@@ -664,13 +684,6 @@ def build_step2_rows(
             ssw = pd.Timestamp(shortage_start_week).normalize()
             sub = wk_loss[(wk_loss["sku_norm"] == sku_key) & (wk_loss["week_start"] >= ssw)]
             total_reorder_amount = int(round(float(sub["loss"].sum())))
-
-        # due_date_reorder_amount: (리드타임 일수 + 안전 4주) 동안의 예상 판매량 = (lead_time/7 + 4) * 주간 평균 loss
-        due_date_reorder_amount: Optional[int] = None
-        if sku_key in avg_weekly_loss_by_sku.index and pd.notna(avg_weekly_loss_by_sku[sku_key]):
-            avg_w = float(avg_weekly_loss_by_sku[sku_key])
-            weeks_cover = (float(lead_time) / 7.0) + 4.0
-            due_date_reorder_amount = int(round(max(0.0, weeks_cover * avg_w)))
 
         if pd.isna(shortage_start_week):
             order_due_date: Optional[str] = None
@@ -847,7 +860,7 @@ def main():
                 st.markdown("**적재 결과 샘플(최대 10행)**")
                 sample_df = pd.DataFrame(r["sample_rows"]).rename(
                     columns={
-                        "reorder_urgency": "회전/리오더",
+                        "reorder_urgency": "조치상태",
                         "sale_start_date": "판매시작일",
                         "total_sale_qty": "판매량",
                         "monthly_code": "월물",
@@ -859,7 +872,7 @@ def main():
                 preferred_order = [
                     "sku",
                     "current_shortage_qty",
-                    "회전/리오더",
+                    "조치상태",
                     "shortage_start_week",
                     "order_due_date",
                     "center_stock_qty",
