@@ -592,11 +592,37 @@ def build_step2_rows(
                 .rename(columns={"sku_norm": "sku"})
             )
 
+    sale_end_agg = pd.DataFrame(columns=["sku", "sale_end_date"])
+    if forecast_rows:
+        forecast_df = pd.DataFrame(forecast_rows)
+
+        forecast_sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
+        forecast_year_week_col = _first_existing_col(forecast_df, ["year_week", "YEAR_WEEK"])
+        forecast_stage_col = _first_existing_col(forecast_df, ["stage", "STAGE"])
+
+        if forecast_sku_col and forecast_year_week_col and forecast_stage_col:
+            forecast_df["sku_norm"] = forecast_df[forecast_sku_col].fillna("").astype(str).str.strip()
+            forecast_df = forecast_df[forecast_df["sku_norm"] != ""].copy()
+
+            forecast_df["stage_norm"] = forecast_df[forecast_stage_col].fillna("").astype(str).str.strip()
+            forecast_df["sale_end_date"] = forecast_df[forecast_year_week_col].apply(_year_week_to_week_start)
+
+            sale_end_agg = (
+                forecast_df[
+                    (forecast_df["stage_norm"] == "쇠퇴") &
+                    (forecast_df["sale_end_date"].notna())
+                ]
+                .groupby("sku_norm", as_index=False)
+                .agg(sale_end_date=("sale_end_date", "min"))
+                .rename(columns={"sku_norm": "sku"})
+            )
+
     forecast_sale_agg = _forecast_total_sale_agg(forecast_rows or [])
 
     merged = step1_agg.merge(center_agg, how="left", on="sku")
     merged = merged.merge(shortage_week_agg, how="left", on="sku")
     merged = merged.merge(sale_start_agg, how="left", on="sku")
+    merged = merged.merge(sale_end_agg, how="left", on="sku")
     merged = merged.merge(forecast_sale_agg, how="left", on="sku")
     merged["center_stock_qty"] = merged["center_stock_qty"].fillna(0.0)
     if "total_sale_qty" in merged.columns:
@@ -661,6 +687,12 @@ def build_step2_rows(
         else:
             sale_start_date_value = pd.Timestamp(sale_start_raw).normalize().date().isoformat()
 
+        sale_end_raw = r.get("sale_end_date")
+        if pd.isna(sale_end_raw):
+            sale_end_date_value: Optional[str] = None
+        else:
+            sale_end_date_value = pd.Timestamp(sale_end_raw).normalize().date().isoformat()
+
         style_for_monthly = str(r["style_code"]).strip() if str(r["style_code"]).strip() else ""
         monthly_code = style_for_monthly[6] if len(style_for_monthly) >= 7 else ""
 
@@ -683,6 +715,7 @@ def build_step2_rows(
                 "sale_start_date": sale_start_date_value,
                 "total_sale_qty": float(_to_float(r.get("total_sale_qty"))),
                 "monthly_code": monthly_code,
+                "sale_end_date": sale_end_date_value,
             }
         )
 
@@ -730,7 +763,7 @@ def load_step2(
             .select(
                 "sku, current_shortage_qty, shortage_start_week, order_due_date, "
                 "reorder_urgency, center_stock_qty, surplus_qty, shortage_qty, total_reorder_amount, due_date_reorder_amount, "
-                "sale_start_date, total_sale_qty, monthly_code"
+                "sale_start_date, total_sale_qty, monthly_code, sale_end_date"
             )
             .limit(10)
             .execute()
@@ -818,6 +851,7 @@ def main():
                         "sale_start_date": "판매시작일",
                         "total_sale_qty": "판매량",
                         "monthly_code": "월물",
+                        "sale_end_date": "판매종료일",
                     }
                 )
                 sample_df = sample_df.drop(columns=["reorder_needed", "발주필요"], errors="ignore")
@@ -834,6 +868,7 @@ def main():
                     "total_reorder_amount",
                     "due_date_reorder_amount",
                     "판매시작일",
+                    "판매종료일",
                     "판매량",
                     "월물",
                 ]
