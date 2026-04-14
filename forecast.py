@@ -381,6 +381,80 @@ def make_full_weeks_for_base(base_df: pd.DataFrame, target_year: int) -> pd.Data
     return full
 
 
+def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    plant, sku별로 week_no 오름차순으로 돌면서
+    BASE_STOCK_QTY / loss를 다시 계산한다.
+
+    규칙
+    - is_forecast == False -> loss = 0
+    - is_forecast == True
+        - sale_qty > 직전 주의 BASE_STOCK_QTY 이면
+          loss = sale_qty - 직전 주의 BASE_STOCK_QTY
+          BASE_STOCK_QTY = 0
+        - 아니면
+          loss = 0
+          BASE_STOCK_QTY = 직전 주의 BASE_STOCK_QTY - sale_qty
+    """
+    if final_df.empty:
+        return final_df
+
+    work = final_df.copy()
+    work["week_no"] = pd.to_numeric(work.get("week_no"), errors="coerce")
+    work["sale_qty"] = pd.to_numeric(work.get("sale_qty"), errors="coerce").fillna(0)
+    work["BASE_STOCK_QTY"] = pd.to_numeric(work.get("BASE_STOCK_QTY"), errors="coerce")
+    work["is_forecast"] = work.get("is_forecast").apply(to_bool)
+
+    work = work.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
+
+    new_base = [None] * len(work)
+    new_loss = [0] * len(work)
+
+    for _, g in work.groupby(["sku", "plant"], sort=False):
+        g = g.sort_values("week_no", na_position="last")
+        prev_base = None
+
+        for idx, row in g.iterrows():
+            current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
+            sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
+            if pd.isna(sale_qty):
+                sale_qty = 0.0
+            sale_qty = float(sale_qty)
+
+            is_forecast = to_bool(row.get("is_forecast"))
+
+            # 첫 행은 원본 BASE_STOCK_QTY를 시작값으로 사용
+            if prev_base is None:
+                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
+
+            if not is_forecast:
+                # 실제행은 loss 무조건 0
+                new_base[idx] = int(round(prev_base))
+                new_loss[idx] = 0
+
+                # 다음 주 계산용 재고는 이번 주 재고 - 이번 주 판매량
+                remain = prev_base - sale_qty
+                if remain < 0:
+                    remain = 0.0
+                prev_base = remain
+            else:
+                # 예측행은 전주 남은 재고 기준으로 계산
+                if sale_qty > prev_base:
+                    loss = sale_qty - prev_base
+                    remain = 0.0
+                else:
+                    loss = 0.0
+                    remain = prev_base - sale_qty
+
+                new_base[idx] = int(round(remain))
+                new_loss[idx] = int(round(loss))
+                prev_base = remain
+
+    work["BASE_STOCK_QTY"] = new_base
+    work["loss"] = new_loss
+    return work
+
+
 def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: int) -> pd.DataFrame:
     """
     target_year 실제값 row 생성
@@ -414,7 +488,7 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: i
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
             "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "is_forecast": False,
-            "loss": None,
+            "loss": 0,
             "IPGO_QTY": to_int_or_none(r.get("IPGO_QTY")),
             "shape_type": None if pd.isna(r.get("shape_type")) or str(r.get("shape_type")).strip() == "" else str(r.get("shape_type")).strip(),
             "week_no": to_int_or_none(r.get("week_no")),
@@ -535,43 +609,6 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         (pd.to_numeric(expanded["week_no"], errors="coerce") == pd.to_numeric(expanded["peak_week"], errors="coerce"))
     )
 
-    # 예측 주차: week_no 오름차순으로 재고 차감. 부족 시 재고 0, 못 판 만큼 loss
-    expanded = expanded.sort_values(
-        ["item_code", "style_code", "sku", "plant", "week_no"],
-        na_position="last"
-    ).reset_index(drop=True)
-
-    n = len(expanded)
-    new_base = [None] * n
-    new_loss = [None] * n
-    grp_cols = ["item_code", "style_code", "sku", "plant"]
-
-    for _, g in expanded.groupby(grp_cols, sort=False):
-        g_sorted = g.sort_values("week_no", na_position="last")
-        init = pd.to_numeric(g_sorted["BASE_STOCK_QTY"].iloc[0], errors="coerce")
-        running = 0.0 if pd.isna(init) else float(init)
-
-        for i, row in g_sorted.iterrows():
-            sale = pd.to_numeric(row["sale_qty"], errors="coerce")
-            if pd.isna(sale):
-                new_base[i] = to_int_or_none(running)
-                new_loss[i] = None
-                continue
-
-            sale_i = int(round(float(sale)))
-            new_s = running - sale_i
-            if new_s < 0:
-                new_base[i] = 0
-                new_loss[i] = int(round(-new_s))
-                running = 0.0
-            else:
-                new_base[i] = int(round(new_s))
-                new_loss[i] = 0
-                running = new_s
-
-    expanded["BASE_STOCK_QTY"] = new_base
-    expanded["loss"] = new_loss
-
     rows = []
     for _, r in expanded.iterrows():
         rows.append({
@@ -583,9 +620,9 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
+            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),  # 시작값만 들고 감 (전체 누적 계산에서 재산정)
             "is_forecast": True,
-            "loss": to_int_or_none(r.get("loss")),
+            "loss": 0,
             "IPGO_QTY": 0,
             "shape_type": None if pd.isna(r.get("shape_type")) or str(r.get("shape_type")).strip() == "" else str(r.get("shape_type")).strip(),
             "week_no": to_int_or_none(r.get("week_no")),
@@ -608,6 +645,9 @@ def build_sku_weekly_forecast_2_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame)
         return []
 
     final_df = final_df.sort_values(["sku", "plant", "week_no"], na_position="last").reset_index(drop=True)
+
+    # 전체 행 기준으로 다시 누적 계산 (실제+예측 연결)
+    final_df = apply_base_stock_and_loss(final_df)
 
     return final_df.to_dict(orient="records")
 
