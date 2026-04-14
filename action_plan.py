@@ -488,11 +488,49 @@ def _forecast_total_sale_agg(forecast_rows: List[Dict[str, Any]]) -> pd.DataFram
     )
 
 
+def _build_sale_end_agg(forecast_rows: Optional[List[Dict[str, Any]]]) -> pd.DataFrame:
+    """
+    예측 테이블(기본: sku_weekly_forecast_2)에서 sku별 판매종료일.
+    stage(또는 동일 의미 컬럼)가 '쇠퇴'인 행 중 year_week가 가장 이른 주를 사용.
+    """
+    sale_end_agg = pd.DataFrame(columns=["sku", "sale_end_date"])
+    if not forecast_rows:
+        return sale_end_agg
+
+    forecast_df = pd.DataFrame(forecast_rows)
+    forecast_sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
+    forecast_year_week_col = _first_existing_col(forecast_df, ["year_week", "YEAR_WEEK"])
+    forecast_stage_col = _first_existing_col(
+        forecast_df,
+        ["stage", "STAGE", "life_stage", "LIFE_STAGE", "sale_stage", "SALE_STAGE"],
+    )
+
+    if not forecast_sku_col or not forecast_year_week_col or not forecast_stage_col:
+        return sale_end_agg
+
+    forecast_df["sku_norm"] = forecast_df[forecast_sku_col].fillna("").astype(str).str.strip()
+    forecast_df = forecast_df[forecast_df["sku_norm"] != ""].copy()
+
+    forecast_df["stage_norm"] = forecast_df[forecast_stage_col].fillna("").astype(str).str.strip()
+    forecast_df["sale_end_date"] = forecast_df[forecast_year_week_col].apply(_year_week_to_week_start)
+
+    return (
+        forecast_df[
+            (forecast_df["stage_norm"] == "쇠퇴") &
+            (forecast_df["sale_end_date"].notna())
+        ]
+        .groupby("sku_norm", as_index=False)
+        .agg(sale_end_date=("sale_end_date", "min"))
+        .rename(columns={"sku_norm": "sku"})
+    )
+
+
 def build_step2_rows(
     step1_rows: List[Dict[str, Any]],
     center_rows: List[Dict[str, Any]],
     weekly_rows: List[Dict[str, Any]],
     forecast_rows: Optional[List[Dict[str, Any]]] = None,
+    forecast_2_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if not step1_rows:
         return []
@@ -592,30 +630,8 @@ def build_step2_rows(
                 .rename(columns={"sku_norm": "sku"})
             )
 
-    sale_end_agg = pd.DataFrame(columns=["sku", "sale_end_date"])
-    if forecast_rows:
-        forecast_df = pd.DataFrame(forecast_rows)
-
-        forecast_sku_col = _first_existing_col(forecast_df, ["sku", "SKU"])
-        forecast_year_week_col = _first_existing_col(forecast_df, ["year_week", "YEAR_WEEK"])
-        forecast_stage_col = _first_existing_col(forecast_df, ["stage", "STAGE"])
-
-        if forecast_sku_col and forecast_year_week_col and forecast_stage_col:
-            forecast_df["sku_norm"] = forecast_df[forecast_sku_col].fillna("").astype(str).str.strip()
-            forecast_df = forecast_df[forecast_df["sku_norm"] != ""].copy()
-
-            forecast_df["stage_norm"] = forecast_df[forecast_stage_col].fillna("").astype(str).str.strip()
-            forecast_df["sale_end_date"] = forecast_df[forecast_year_week_col].apply(_year_week_to_week_start)
-
-            sale_end_agg = (
-                forecast_df[
-                    (forecast_df["stage_norm"] == "쇠퇴") &
-                    (forecast_df["sale_end_date"].notna())
-                ]
-                .groupby("sku_norm", as_index=False)
-                .agg(sale_end_date=("sale_end_date", "min"))
-                .rename(columns={"sku_norm": "sku"})
-            )
+    # 판매종료일은 sku_weekly_forecast_2 전용(forecast_2_rows). 기존 sku_weekly_forecast에는 stage가 없을 수 있음.
+    sale_end_agg = _build_sale_end_agg(forecast_2_rows)
 
     forecast_sale_agg = _forecast_total_sale_agg(forecast_rows or [])
 
@@ -748,21 +764,24 @@ def load_step2(
     center_table = get_center_stock_table_name()
     weekly_table = get_weekly_stock_table_name()
     forecast_table = get_sku_weekly_forecast_table_name()
+    forecast_2_table = get_sku_weekly_forecast_2_table_name()
     step2_table = get_step2_table_name()
 
     step1_rows = fetch_supabase_table_all_rows(client, step1_table)
     center_rows = fetch_supabase_table_all_rows(client, center_table)
     weekly_rows = fetch_supabase_table_all_rows(client, weekly_table)
     forecast_rows = fetch_supabase_table_all_rows(client, forecast_table)
+    forecast_2_rows = fetch_supabase_table_all_rows(client, forecast_2_table)
 
     if style_codes:
         step1_rows = filter_rows_by_style_codes(step1_rows, style_codes)
         center_rows = filter_rows_by_style_codes(center_rows, style_codes)
         weekly_rows = filter_rows_by_style_codes(weekly_rows, style_codes)
         forecast_rows = filter_rows_by_style_codes(forecast_rows, style_codes)
+        forecast_2_rows = filter_rows_by_style_codes(forecast_2_rows, style_codes)
 
     result_rows = build_step2_rows(
-        step1_rows, center_rows, weekly_rows, forecast_rows
+        step1_rows, center_rows, weekly_rows, forecast_rows, forecast_2_rows=forecast_2_rows
     )
 
     if replace_mode:
@@ -790,6 +809,7 @@ def load_step2(
         "center_rows": len(center_rows),
         "weekly_rows": len(weekly_rows),
         "forecast_rows": len(forecast_rows),
+        "forecast_2_rows": len(forecast_2_rows),
         "inserted_rows": inserted,
         "sample_rows": sample,
         "replace_mode": replace_mode,
@@ -852,7 +872,8 @@ def main():
                     f"step1 {r['step1_rows']:,}행, "
                     f"center {r['center_rows']:,}행, "
                     f"weekly {r['weekly_rows']:,}행, "
-                    f"forecast {r.get('forecast_rows', 0):,}행 기준 "
+                    f"forecast {r.get('forecast_rows', 0):,}행, "
+                    f"forecast_2 {r.get('forecast_2_rows', 0):,}행 기준 "
                     f"step2 {r['inserted_rows']:,}행 저장"
                 )
 
