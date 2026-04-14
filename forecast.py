@@ -463,16 +463,6 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
     if missing_weeks.empty:
         return pd.DataFrame()
 
-    # 현재까지 실제 누적 판매량
-    actual_summary = (
-        sku_year[sku_year["week_no"] <= curr_week]
-        .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
-        .agg(actual_sale_cum=("SALE_QTY", "sum"))
-    )
-
-    if actual_summary.empty:
-        return pd.DataFrame()
-
     # 가장 최근 실제 주차의 재고/입고
     latest_actual = (
         sku_year[sku_year["week_no"] <= curr_week]
@@ -487,50 +477,56 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         "BASE_STOCK_QTY", "IPGO_QTY"
     ]].copy()
 
-    base = actual_summary.merge(
+    # 예측 대상 주차에 최신 재고 붙이기
+    expanded = missing_weeks.merge(
         latest_actual,
         on=["item_code", "style_code", "sku", "plant"],
         how="left"
     )
 
-    # 현재까지 누적 ratio
-    actual_weeks = (
-        sku_year[sku_year["week_no"] <= curr_week][["item_code", "week_no"]]
-        .drop_duplicates()
-        .copy()
-    )
-    actual_weeks = attach_plc_fields_by_itemcode_weekno(actual_weeks, plc_year)
+    # 미래 주차별 item_plc 비중 붙이기
+    expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
 
-    ratio_cum = (
-        actual_weeks.groupby("item_code", as_index=False)
-        .agg(ratio_cum=("last_year_ratio_pct", "sum"))
+    # item_code별 미래 주차 ratio 합계
+    future_ratio_sum = (
+        expanded.groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
+        .agg(future_ratio_sum=("last_year_ratio_pct", "sum"))
     )
 
-    base = base.merge(ratio_cum, on="item_code", how="left")
-
-    # 예측 대상 주차 붙이기
-    expanded = missing_weeks.merge(
-        base,
+    expanded = expanded.merge(
+        future_ratio_sum,
         on=["item_code", "style_code", "sku", "plant"],
         how="left"
     )
 
-    # 각 미래 주차에 PLC 붙이기
-    expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
+    # 현재까지 실제 판매량
+    actual_summary = (
+        sku_year[sku_year["week_no"] <= curr_week]
+        .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
+        .agg(actual_sale_cum=("SALE_QTY", "sum"))
+    )
+
+    expanded = expanded.merge(
+        actual_summary,
+        on=["item_code", "style_code", "sku", "plant"],
+        how="left"
+    )
 
     def calc_forecast_sale(row):
         actual_sale_cum = pd.to_numeric(row.get("actual_sale_cum"), errors="coerce")
-        ratio_cum = pd.to_numeric(row.get("ratio_cum"), errors="coerce")
+        future_ratio_sum = pd.to_numeric(row.get("future_ratio_sum"), errors="coerce")
         week_ratio = pd.to_numeric(row.get("last_year_ratio_pct"), errors="coerce")
 
-        if pd.isna(actual_sale_cum) or pd.isna(ratio_cum) or pd.isna(week_ratio):
+        if pd.isna(actual_sale_cum):
+            actual_sale_cum = 0
+
+        if pd.isna(future_ratio_sum) or pd.isna(week_ratio):
             return None
 
-        if ratio_cum <= 0:
+        if future_ratio_sum <= 0:
             return None
 
-        season_total = float(actual_sale_cum) / (float(ratio_cum) / 100.0)
-        raw = season_total * (float(week_ratio) / 100.0)
+        raw = float(actual_sale_cum) * (float(week_ratio) / float(future_ratio_sum))
         return int(round(raw))
 
     expanded["sale_qty"] = expanded.apply(calc_forecast_sale, axis=1)
