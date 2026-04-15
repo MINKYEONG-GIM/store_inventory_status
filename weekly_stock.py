@@ -80,8 +80,9 @@ def get_supabase_client():
 # 테이블명
 # -----------------------------
 def get_forecast_table_name() -> str:
-    # weekly_stock 적재의 소스 테이블 (forecast_2 사용 안 함)
-    return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_TABLE") or "sku_weekly_forecast").strip()
+    # weekly_stock 적재의 소스 테이블
+    # 기본은 loss/sale_qty 컬럼이 있는 forecast_2를 사용
+    return (os.getenv("SUPABASE_SKU_WEEKLY_FORECAST_TABLE") or "sku_weekly_forecast_2").strip()
 
 
 def get_center_stock_table_name() -> str:
@@ -252,6 +253,12 @@ def build_weekly_stock_rows(
 
     forecast_df = pd.DataFrame(forecast_rows)
     center_df = pd.DataFrame(center_rows) if center_rows else pd.DataFrame()
+
+    # forecast 컬럼명/스키마 차이 흡수
+    # - sku_weekly_forecast: "SALE_QTY"(대문자) + loss 없음
+    # - sku_weekly_forecast_2: sale_qty(소문자) + loss 있음
+    if "sale_qty" not in forecast_df.columns and "SALE_QTY" in forecast_df.columns:
+        forecast_df["sale_qty"] = forecast_df["SALE_QTY"]
 
     # forecast 필수 컬럼 보정
     forecast_required_cols = [
