@@ -88,6 +88,24 @@ def insert_in_chunks(client, table_name: str, rows: list, batch_size: int = 500)
         client.table(table_name).insert(chunk).execute()
 
 
+def delete_all_rows(client, table_name: str):
+    client.table(table_name).delete().neq("id", 0).execute()
+
+
+def parse_style_input(style_text: str) -> list[str]:
+    if not style_text:
+        return []
+
+    parts = []
+    for x in style_text.replace("\n", ",").split(","):
+        s = x.strip()
+        if s:
+            parts.append(s)
+
+    # 중복 제거, 입력 순서 유지
+    return list(dict.fromkeys(parts))
+
+
 def calday_to_year_week(calday_value):
     """
     예: 20260319 -> 2026-12
@@ -141,7 +159,7 @@ def extract_item_code(sku):
     return s[2:4]
 
 
-def load_raw_file_df(client) -> pd.DataFrame:
+def load_raw_file_df(client, style_codes: list[str] | None = None) -> pd.DataFrame:
     rows = fetch_all_rows(client, RAW_FILE_TABLE, RAW_FILE_SELECT, batch_size=1000)
     df = pd.DataFrame(rows)
 
@@ -164,6 +182,9 @@ def load_raw_file_df(client) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df = df.dropna(subset=["CALDAY_DT", "year_week", "PLANT", "sku"])
+
+    if style_codes:
+        df = df[df["style_code"].isin(style_codes)].copy()
 
     weekly_df = (
         df.groupby(
@@ -218,29 +239,62 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     return rows
 
 
-def run_job():
+def run_job(style_codes: list[str], replace_mode: bool):
     client = get_supabase_client()
 
     st.write("1. RAW FILE 불러오는 중...")
-    raw_df = load_raw_file_df(client)
-    st.write(f"RAW FILE rows: {len(raw_df):,}")
+    raw_df = load_raw_file_df(client, style_codes=style_codes)
+    st.write(f"선택된 스타일 rows: {len(raw_df):,}")
+
+    if raw_df.empty:
+        st.warning("선택한 스타일에 해당하는 데이터가 없습니다.")
+        return
 
     st.write("2. sku_weekly_forecast row 생성 중...")
     rows = build_forecast_rows(raw_df)
     st.write(f"생성 rows: {len(rows):,}")
 
-    st.write("3. 기존 데이터 유지 — 새 행만 추가(누적) 중...")
-    insert_in_chunks(client, SKU_WEEKLY_FORECAST_TABLE, rows, batch_size=500)
+    if replace_mode:
+        st.write("3. 기존 테이블 데이터 삭제 중...")
+        delete_all_rows(client, SKU_WEEKLY_FORECAST_TABLE)
+        st.write("4. 새 데이터 적재 중...")
+        insert_in_chunks(client, SKU_WEEKLY_FORECAST_TABLE, rows, batch_size=500)
+        st.success(f"완료: 기존 데이터 삭제 후 {len(rows):,}건 적재")
+    else:
+        st.write("3. 기존 데이터 유지 + 새 데이터 누적 적재 중...")
+        insert_in_chunks(client, SKU_WEEKLY_FORECAST_TABLE, rows, batch_size=500)
+        st.success(f"완료: 기존 데이터 유지, {len(rows):,}건 추가 적재")
 
-    st.success(f"완료: {len(rows):,}건 추가 적재 (기존 행은 유지)")
 
+st.set_page_config(page_title="sku_weekly_forecast 적재", layout="centered")
+st.title("sku_weekly_forecast 적재")
 
-st.set_page_config(page_title="sku_weekly_forecast 적재", layout="wide")
-st.title("sku_weekly_forecast 단순 적재")
-st.write("RAW FILE 그대로 사용 + CALDAY 기반 year_week, week_no만 추가")
+style_text = st.text_area(
+    "스타일코드 입력",
+    height=120,
+    placeholder="예:\nSPYCG37C01\nSPYWG23C51\n또는\nSPYCG37C01, SPYWG23C51"
+)
 
-if st.button("실행"):
-    try:
-        run_job()
-    except Exception as e:
-        st.error(f"실패: {e}")
+style_codes = parse_style_input(style_text)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("기존 테이블 지우고 넣기", use_container_width=True):
+        try:
+            if not style_codes:
+                st.error("스타일코드를 1개 이상 입력하세요.")
+            else:
+                run_job(style_codes=style_codes, replace_mode=True)
+        except Exception as e:
+            st.error(f"실패: {e}")
+
+with col2:
+    if st.button("기존 테이블 유지하고 누적하기", use_container_width=True):
+        try:
+            if not style_codes:
+                st.error("스타일코드를 1개 이상 입력하세요.")
+            else:
+                run_job(style_codes=style_codes, replace_mode=False)
+        except Exception as e:
+            st.error(f"실패: {e}")
