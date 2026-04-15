@@ -383,16 +383,10 @@ def make_full_weeks_for_base(base_df: pd.DataFrame, target_year: int) -> pd.Data
 
 def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     """
-    규칙
     - is_forecast == False:
-        sku_weekly_forecast에서 가져온 BASE_STOCK_QTY 값을 그대로 유지
+        원본 BASE_STOCK_QTY / sale_qty / IPGO_QTY / loss 유지
     - is_forecast == True:
-        마지막 실제 주의 BASE_STOCK_QTY를 시작 재고로 삼아
-        주차 순서대로 BASE_STOCK_QTY / loss를 계산
-    계산식
-    - available_stock = prev_base + IPGO_QTY
-    - loss = max(0, sale_qty - available_stock)
-    - BASE_STOCK_QTY = max(0, available_stock - sale_qty)
+        마지막 실제 BASE_STOCK_QTY를 시작값으로 하여 forecast 구간만 계산
     """
     if final_df.empty:
         return final_df
@@ -423,45 +417,26 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
             ipgo_qty = pd.to_numeric(row.get("IPGO_QTY"), errors="coerce")
             current_loss = pd.to_numeric(row.get("loss"), errors="coerce")
-            if pd.isna(sale_qty):
-                sale_qty = 0.0
-            if pd.isna(ipgo_qty):
-                ipgo_qty = 0.0
-            if pd.isna(current_loss):
-                current_loss = 0.0
-            sale_qty = float(sale_qty)
-            ipgo_qty = float(ipgo_qty)
-            current_loss = float(current_loss)
+            sale_qty = 0.0 if pd.isna(sale_qty) else float(sale_qty)
+            ipgo_qty = 0.0 if pd.isna(ipgo_qty) else float(ipgo_qty)
+            current_loss = 0.0 if pd.isna(current_loss) else float(current_loss)
 
             if not is_forecast:
                 # 실제 행은 원본값 그대로 유지
-                if pd.isna(current_base):
-                    prev_base = 0.0
-                else:
-                    prev_base = float(current_base)
-
+                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
                 new_base[idx] = None if pd.isna(current_base) else int(round(float(current_base)))
-                # sku_weekly_forecast에는 loss 컬럼이 없으므로 실제는 0 고정
-                new_loss[idx] = 0
+                new_loss[idx] = int(round(current_loss))
                 continue
 
-            # 여기부터 forecast 행 계산
+            # forecast 행만 계산
             if prev_base is None:
                 prev_base = 0.0
-
-            # 이번 주 판매 전에 입고 반영
             available_stock = prev_base + ipgo_qty
-
-            # loss 계산
             curr_loss = max(0.0, sale_qty - available_stock)
-
-            # 이번 주 종료 재고
             remain = max(0.0, available_stock - sale_qty)
 
             new_base[idx] = int(round(remain))
             new_loss[idx] = int(round(curr_loss))
-
-            # 다음 주 전주재고로 넘김
             prev_base = remain
 
     work["BASE_STOCK_QTY"] = new_base
