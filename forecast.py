@@ -383,10 +383,14 @@ def make_full_weeks_for_base(base_df: pd.DataFrame, target_year: int) -> pd.Data
 
 def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     """
+    규칙
     - is_forecast == False:
-        원본 BASE_STOCK_QTY / sale_qty / IPGO_QTY / loss 유지
+        sku_weekly_forecast 원본값 그대로 유지
+        BASE_STOCK_QTY / sale_qty / IPGO_QTY / loss 재계산 안 함
     - is_forecast == True:
-        마지막 실제 BASE_STOCK_QTY를 시작값으로 하여 forecast 구간만 계산
+        마지막 실제 BASE_STOCK_QTY를 시작 재고로 사용
+        IPGO_QTY는 0 상태에서 sale_qty만 반영하여
+        BASE_STOCK_QTY / loss 계산
     """
     if final_df.empty:
         return final_df
@@ -416,16 +420,14 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
             ipgo_qty = pd.to_numeric(row.get("IPGO_QTY"), errors="coerce")
-            current_loss = pd.to_numeric(row.get("loss"), errors="coerce")
             sale_qty = 0.0 if pd.isna(sale_qty) else float(sale_qty)
             ipgo_qty = 0.0 if pd.isna(ipgo_qty) else float(ipgo_qty)
-            current_loss = 0.0 if pd.isna(current_loss) else float(current_loss)
 
             if not is_forecast:
                 # 실제 행은 원본값 그대로 유지
-                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
                 new_base[idx] = None if pd.isna(current_base) else int(round(float(current_base)))
-                new_loss[idx] = int(round(current_loss))
+                new_loss[idx] = 0 if pd.isna(row.get("loss")) else int(round(float(row.get("loss"))))
+                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
                 continue
 
             # forecast 행만 계산
