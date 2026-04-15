@@ -384,13 +384,17 @@ def make_full_weeks_for_base(base_df: pd.DataFrame, target_year: int) -> pd.Data
 def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
     """
     규칙
-    - is_forecast == False:
-        sku_weekly_forecast 원본값 그대로 유지
-        BASE_STOCK_QTY / sale_qty / IPGO_QTY / loss 재계산 안 함
-    - is_forecast == True:
-        마지막 실제 BASE_STOCK_QTY를 시작 재고로 사용
-        IPGO_QTY는 0 상태에서 sale_qty만 반영하여
-        BASE_STOCK_QTY / loss 계산
+    - is_forecast == False(실제):
+        available_stock = (재고 시작값) + IPGO_QTY
+        shortage = max(0, sale_qty - available_stock)  # 그 주에 못 판 수량(단일)
+        BASE_STOCK_QTY = max(0, available_stock - sale_qty)  # 이월 재고
+        loss는 누적하지 않음 (단일 shortage)
+    - is_forecast == True(예측):
+        available_stock = (전주 이월 재고) + IPGO_QTY(보통 0)
+        shortage = max(0, sale_qty - available_stock)
+        BASE_STOCK_QTY = max(0, available_stock - sale_qty)
+        loss는 '누적 미래 손실'로 계산
+        = 전주 loss + shortage
     """
     if final_df.empty:
         return final_df
@@ -414,32 +418,37 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values("week_no", na_position="last")
 
         prev_base = None
+        prev_loss = 0.0
 
         for idx, row in g.iterrows():
             is_forecast = to_bool(row.get("is_forecast"))
             current_base = pd.to_numeric(row.get("BASE_STOCK_QTY"), errors="coerce")
             sale_qty = pd.to_numeric(row.get("sale_qty"), errors="coerce")
             ipgo_qty = pd.to_numeric(row.get("IPGO_QTY"), errors="coerce")
+
             sale_qty = 0.0 if pd.isna(sale_qty) else float(sale_qty)
             ipgo_qty = 0.0 if pd.isna(ipgo_qty) else float(ipgo_qty)
 
-            if not is_forecast:
-                # 실제 행은 원본값 그대로 유지
-                new_base[idx] = None if pd.isna(current_base) else int(round(float(current_base)))
-                new_loss[idx] = 0 if pd.isna(row.get("loss")) else int(round(float(row.get("loss"))))
-                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
-                continue
-
-            # forecast 행만 계산
+            # 재고 시작값 결정:
+            # - 첫 주차(또는 앞에서 계산된 값이 없을 때)는 current_base를 시작 재고로 사용
+            # - 이후부터는 prev_base(전주 이월 재고)를 사용
             if prev_base is None:
-                prev_base = 0.0
+                prev_base = 0.0 if pd.isna(current_base) else float(current_base)
+
             available_stock = prev_base + ipgo_qty
-            curr_loss = max(0.0, sale_qty - available_stock)
+            shortage = max(0.0, sale_qty - available_stock)
             remain = max(0.0, available_stock - sale_qty)
+
+            if is_forecast:
+                curr_loss = prev_loss + shortage  # 누적
+            else:
+                curr_loss = shortage  # 단일(누적 X)
 
             new_base[idx] = int(round(remain))
             new_loss[idx] = int(round(curr_loss))
+
             prev_base = remain
+            prev_loss = curr_loss
 
     work["BASE_STOCK_QTY"] = new_base
     work["loss"] = new_loss
@@ -480,7 +489,7 @@ def build_actual_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year: i
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
             "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),
             "is_forecast": False,
-            "loss": 0,
+            "loss": None,
             "IPGO_QTY": to_int_or_none(r.get("IPGO_QTY")),
             "shape_type": None if pd.isna(r.get("shape_type")) or str(r.get("shape_type")).strip() == "" else str(r.get("shape_type")).strip(),
             "week_no": to_int_or_none(r.get("week_no")),
