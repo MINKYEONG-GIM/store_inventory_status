@@ -257,8 +257,37 @@ def build_weekly_stock_rows(
     # forecast 컬럼명/스키마 차이 흡수
     # - sku_weekly_forecast: "SALE_QTY"(대문자) + loss 없음
     # - sku_weekly_forecast_2: sale_qty(소문자) + loss 있음
-    if "sale_qty" not in forecast_df.columns and "SALE_QTY" in forecast_df.columns:
-        forecast_df["sale_qty"] = forecast_df["SALE_QTY"]
+    # 이름이 하나라도 다르면 해당 열은 None → 합계가 전부 0으로 보일 수 있음
+    _sale_aliases = ("sale_qty", "SALE_QTY", "sales_qty", "SALES_QTY")
+    for _alias in _sale_aliases:
+        if "sale_qty" not in forecast_df.columns and _alias in forecast_df.columns:
+            forecast_df["sale_qty"] = forecast_df[_alias]
+            break
+
+    _base_aliases = (
+        "BASE_STOCK_QTY",
+        "base_stock_qty",
+        "total_base_stock_qty",
+        "BASE_STOCK",
+        "base_stock",
+        "total_base_stock",
+    )
+    for _alias in _base_aliases:
+        if "BASE_STOCK_QTY" not in forecast_df.columns and _alias in forecast_df.columns:
+            forecast_df["BASE_STOCK_QTY"] = forecast_df[_alias]
+            break
+
+    _ipgo_aliases = ("IPGO_QTY", "ipgo_qty", "IPGO", "ipgo")
+    for _alias in _ipgo_aliases:
+        if "IPGO_QTY" not in forecast_df.columns and _alias in forecast_df.columns:
+            forecast_df["IPGO_QTY"] = forecast_df[_alias]
+            break
+
+    _loss_aliases = ("loss", "LOSS", "Loss", "total_loss")
+    for _alias in _loss_aliases:
+        if "loss" not in forecast_df.columns and _alias in forecast_df.columns:
+            forecast_df["loss"] = forecast_df[_alias]
+            break
 
     # forecast 필수 컬럼 보정
     forecast_required_cols = [
