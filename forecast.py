@@ -436,14 +436,16 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             current_loss = 0.0 if pd.isna(current_loss) else float(current_loss)
 
             if not is_forecast:
-                # 실제 행은 원본 BASE_STOCK_QTY 그대로 유지
-                new_base[idx] = int(round(current_base))
-                new_loss[idx] = int(round(current_loss))
-
-                # 다음 주 계산용 내부 재고만 계산
-                prev_remain = max(0.0, current_base - sale_qty)
-                prev_loss = current_loss
-
+                available_stock = current_base + ipgo_qty
+            
+                shortage = max(0.0, sale_qty - available_stock)
+                remain = max(0.0, available_stock - sale_qty)
+            
+                new_base[idx] = int(round(remain))
+                new_loss[idx] = 0  # actual은 loss 누적 안함
+            
+                prev_remain = remain
+                prev_loss = 0
             else:
                 # 예측 행부터는 전주 남은 재고를 사용
                 start_stock = 0.0 if prev_remain is None else float(prev_remain)
@@ -556,11 +558,16 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         .copy()
     )
 
+    latest_actual["remain_stock"] = (
+        latest_actual["BASE_STOCK_QTY"].fillna(0)
+        + latest_actual["IPGO_QTY"].fillna(0)
+        - latest_actual["SALE_QTY"].fillna(0)
+    ).clip(lower=0)
+    
     latest_actual = latest_actual[[
         "item_code", "style_code", "sku", "plant",
-        "BASE_STOCK_QTY", "IPGO_QTY"
-    ]].copy()
-
+        "remain_stock"
+    ]]
     # 예측 대상 주차에 최신 재고 붙이기
     expanded = missing_weeks.merge(
         latest_actual,
@@ -706,7 +713,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "BASE_STOCK_QTY": to_int_or_none(r.get("BASE_STOCK_QTY")),  # 시작값만 들고 감
+            "BASE_STOCK_QTY": to_int_or_none(r.get("remain_stock"))
             "is_forecast": True,
             "loss": 0,
             "IPGO_QTY": 0,
