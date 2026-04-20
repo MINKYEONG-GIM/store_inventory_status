@@ -713,7 +713,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
             "is_peak_week": bool(r.get("is_peak_week")),
             "plant": None if pd.isna(r.get("plant")) else str(r.get("plant")).strip(),
             "last_year_ratio_pct": to_float_or_none(r.get("last_year_ratio_pct")),
-            "BASE_STOCK_QTY": to_int_or_none(r.get("remain_stock"))
+            "BASE_STOCK_QTY": to_int_or_none(r.get("remain_stock")),
             "is_forecast": True,
             "loss": 0,
             "IPGO_QTY": 0,
