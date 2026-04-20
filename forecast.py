@@ -439,7 +439,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
                 if prev_remain is None:
                     start_stock = current_base
                 else:
-                    start_stock = prev_remain
+                    start_stock = float(prev_remain)
             
                 available_stock = start_stock
             
@@ -448,7 +448,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
                 new_base[idx] = int(round(remain))
                 new_loss[idx] = 0
             
-                prev_remain = remain
+                prev_remain = int(round(remain))
                 prev_loss = 0
             
             else:
