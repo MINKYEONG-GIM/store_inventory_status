@@ -17,8 +17,8 @@ except ImportError:
 
 st.set_page_config(page_title="데이터 쌓기", layout="centered")
 
-DEFAULT_LEAD_TIME_DAYS = 21
-DEFAULT_INVENTORY_SAFETY_WEEKS = 2.0
+DEFAULT_LEAD_TIME_DAYS = 7
+DEFAULT_INVENTORY_SAFETY_WEEKS = 0
 
 
 def show_detailed_exception(err: BaseException, title: str = "오류가 발생했습니다") -> None:
