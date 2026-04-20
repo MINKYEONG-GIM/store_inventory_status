@@ -508,6 +508,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         return pd.DataFrame()
 
     sku_year = sku_df[sku_df["year"] == target_year].copy()
+    sku_recent_source = sku_df[sku_df["year"].isin([target_year - 1, target_year])].copy()
     plc_year = plc_df.copy()
 
     if sku_year.empty:
@@ -564,16 +565,93 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
     expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
 
     # sku, plant별 최근 2주 actual 판매량 기준
+    # 현재 주차 기준 직전 2주
+    def get_prev_two_year_weeks(curr_year, curr_week):
+        if curr_week == 1:
+            return [(curr_year - 1, 51), (curr_year - 1, 52)]
+        elif curr_week == 2:
+            return [(curr_year - 1, 52), (curr_year, 1)]
+        else:
+            return [(curr_year, curr_week - 2), (curr_year, curr_week - 1)]
+    
+    
+    def build_recent_2w_actual(sku_df: pd.DataFrame, curr_year: int, curr_week: int) -> pd.DataFrame:
+        prev_targets = get_prev_two_year_weeks(curr_year, curr_week)
+    
+        target_df = pd.DataFrame(prev_targets, columns=["year", "week_no"])
+    
+        sku_plant_keys = sku_df[["sku", "plant"]].drop_duplicates().copy()
+        sku_plant_keys["key"] = 1
+        target_df["key"] = 1
+    
+        base = (
+            sku_plant_keys
+            .merge(target_df, on="key", how="inner")
+            .drop(columns=["key"])
+        )
+    
+        actual_sales = sku_df[["sku", "plant", "year", "week_no", "SALE_QTY"]].copy()
+        actual_sales["week_no"] = pd.to_numeric(actual_sales["week_no"], errors="coerce")
+        actual_sales["year"] = pd.to_numeric(actual_sales["year"], errors="coerce")
+        actual_sales["SALE_QTY"] = pd.to_numeric(actual_sales["SALE_QTY"], errors="coerce")
+    
+        recent_2w = base.merge(
+            actual_sales,
+            on=["sku", "plant", "year", "week_no"],
+            how="left"
+        )
+    
+        recent_2w["SALE_QTY"] = recent_2w["SALE_QTY"].fillna(0)
+    
+        recent_2w = (
+            recent_2w
+            .groupby(["sku", "plant"], as_index=False)
+            .agg(
+                recent_2w_sale_sum=("SALE_QTY", "sum"),
+                recent_2w_sale_avg=("SALE_QTY", "mean")
+            )
+        )
+
+        return recent_2w
+    
+    # sku, plant 기준 목록
+    sku_plant_keys = sku_year[["sku", "plant"]].drop_duplicates().copy()
+    target_week_df = pd.DataFrame({"week_no": target_weeks})
+    
+    # 모든 sku, plant 에 대해 n-2, n-1 주차 강제 생성
+    sku_plant_keys["key"] = 1
+    target_week_df["key"] = 1
+    
+    recent_2w_base = (
+        sku_plant_keys
+        .merge(target_week_df, on="key", how="inner")
+        .drop(columns=["key"])
+    )
+    
+    # 실제 판매량 붙이기
+    recent_actual_sales = (
+        sku_year[["sku", "plant", "week_no", "SALE_QTY"]]
+        .copy()
+    )
+    
+    recent_actual_2w = recent_2w_base.merge(
+        recent_actual_sales,
+        on=["sku", "plant", "week_no"],
+        how="left"
+    )
+    
+    # 판매 row 없으면 0 처리
+    recent_actual_2w["SALE_QTY"] = pd.to_numeric(
+        recent_actual_2w["SALE_QTY"], errors="coerce"
+    ).fillna(0)
+    
+    # 최근 2주 합/평균 계산
     recent_actual_2w = (
-        sku_year[sku_year["week_no"] <= curr_week]
-        .sort_values(["sku", "plant", "week_no"])
-        .groupby(["sku", "plant"], group_keys=False)
-        .tail(2)
+        recent_actual_2w
         .groupby(["sku", "plant"], as_index=False)
         .agg(
             recent_2w_sale_sum=("SALE_QTY", "sum"),
-            recent_2w_sale_avg=("SALE_QTY", "mean"),
-            recent_2w_count=("SALE_QTY", "count")
+            recent_2w_sale_avg=("SALE_QTY", "mean")
         )
     )
 
@@ -583,42 +661,34 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         how="left"
     )
 
+    
+    def round_half_up(x):
+        return int(math.floor(float(x) + 0.5))
+    
     def apply_stage_rounding(value, stage):
         if value is None:
             return 0
-
-        # 소수 첫째자리 기준 처리
+    
         x = float(value)
-
-        # 성장기 → 올림
-        if stage == "성장기":
+        stage = None if pd.isna(stage) else str(stage).strip()
+    
+        if stage in ["도입", "성장"]:
             return int(math.ceil(x))
-
-        # 성숙기 → 반올림
-        elif stage == "성숙기":
-            return int(round(x))
-
-        # 쇠퇴기 → 내림
-        elif stage == "쇠퇴기":
+        elif stage == "성숙":
+            return round_half_up(x)
+        elif stage == "쇠퇴":
             return int(math.floor(x))
-
-        # 예외: stage 없으면 반올림
         else:
-            return int(round(x))
+            return round_half_up(x)
 
     def calc_forecast_sale(row):
         recent_2w_sale_avg = pd.to_numeric(row.get("recent_2w_sale_avg"), errors="coerce")
-        recent_2w_count = pd.to_numeric(row.get("recent_2w_count"), errors="coerce")
         week_ratio = pd.to_numeric(row.get("last_year_ratio_pct"), errors="coerce")
         stage = row.get("stage")
-
+        
         if pd.isna(week_ratio):
             return 0
-
-        # 최근 2주 actual이 없으면 예측 0
-        if pd.isna(recent_2w_count) or recent_2w_count == 0:
-            return 0
-
+        
         if pd.isna(recent_2w_sale_avg):
             recent_2w_sale_avg = 0.0
 
