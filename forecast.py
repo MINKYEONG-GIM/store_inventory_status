@@ -551,7 +551,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
 
     # 가장 최근 실제 주차의 재고/입고
     latest_actual = (
-        sku_year[sku_year["week_no"] <= curr_week]
+        sku_year
         .sort_values(["item_code", "sku", "plant", "week_no"])
         .groupby(["item_code", "style_code", "sku", "plant"], as_index=False)
         .tail(1)
