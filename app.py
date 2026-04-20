@@ -226,43 +226,6 @@ def simulate_inventory_runway_weeks(
     return total, rem
 
 
-def _target_week_by_cover_weeks(
-    weekly_list: List[Tuple[int, float]],
-    cover_weeks: float,
-) -> Optional[int]:
-    """cover_weeks(예: lead_time주 + 2주/4주)에 해당하는 마지막 주차."""
-    if not weekly_list:
-        return None
-    n = max(1, int(math.ceil(cover_weeks)))
-    idx = min(n, len(weekly_list)) - 1
-    return int(weekly_list[idx][0])
-
-
-def _required_qty_through_week(
-    weekly_list: List[Tuple[int, float]],
-    target_week: int,
-) -> float:
-    """target_week까지 필요한 총 판매량."""
-    total = 0.0
-    for wn, sale in weekly_list:
-        if wn > target_week:
-            break
-        total += max(0.0, float(sale))
-    return total
-
-
-def classify_store_by_qty(
-    current_qty: float,
-    req_2w: float,
-    req_4w: float,
-) -> str:
-    if current_qty > req_4w:
-        return "여유 매장"
-    if current_qty > req_2w:
-        return "유지 매장"
-    return "부족 매장"
-
-
 def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """sku_weekly_forecast_2 DataFrame → store_inventory_status_step1 적재용 레코드."""
     if df is None or df.empty:
@@ -281,13 +244,6 @@ def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]
         )
 
     lead_days = get_lead_time_days()
-    lead_weeks = max(0.0, float(lead_days) / 7.0)
-
-    safety_2w = 2.0
-    safety_4w = 4.0
-
-    cover_2w = lead_weeks + safety_2w
-    cover_4w = lead_weeks + safety_4w
 
     cw = int(pd.Timestamp.today().isocalendar().week)
 
@@ -319,6 +275,11 @@ def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]
                 continue
             weekly_list.append((wn, _to_float_qty(r[sale_c])))
 
+        this_week_sale = weekly_list[0][1] if len(weekly_list) >= 1 else 0.0
+        next_week_sale = weekly_list[1][1] if len(weekly_list) >= 2 else 0.0
+
+        required_qty = float(this_week_sale) + float(next_week_sale) + 1.0
+
         g_for_base = g2.copy()
         g_for_base["week_no"] = g_for_base["_wn"]
         if wn_c in g_for_base.columns and wn_c != "week_no":
@@ -342,31 +303,24 @@ def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]
         else:
             inv_w, _ = simulate_inventory_runway_weeks(start_stock, weekly_list)
 
-        target_week_2w = _target_week_by_cover_weeks(weekly_list, cover_2w)
-        target_week_4w = _target_week_by_cover_weeks(weekly_list, cover_4w)
+        current_qty = start_stock
 
-        req_2w = 0.0
-        req_4w = 0.0
+        tolerance = max(1.0, required_qty * 0.05)  # 5% 허용 오차
 
-        if target_week_2w is not None:
-            req_2w = _required_qty_through_week(weekly_list, target_week_2w)
+        if current_qty < required_qty - tolerance:
+            band = "부족 매장"
+            est_short = int(round(required_qty - current_qty))
+            est_surplus = None
 
-        if target_week_4w is not None:
-            req_4w = _required_qty_through_week(weekly_list, target_week_4w)
+        elif current_qty > required_qty + tolerance:
+            band = "여유 매장"
+            est_short = None
+            est_surplus = int(round(current_qty - required_qty))
 
-        band = classify_store_by_qty(
-            current_qty=start_stock,
-            req_2w=req_2w,
-            req_4w=req_4w,
-        )
-
-        est_short = 0
-        est_surplus = 0
-
-        if band == "부족 매장":
-            est_short = int(round(max(0.0, req_4w - start_stock)))
-        elif band == "여유 매장":
-            est_surplus = int(round(max(0.0, start_stock - req_4w)))
+        else:
+            band = "유지 매장"
+            est_short = None
+            est_surplus = None
 
         inv_display = 9999.99 if math.isinf(inv_w) else round(float(inv_w), 4)
 
@@ -377,10 +331,10 @@ def compute_step1_rows_from_forecast_df(df: pd.DataFrame) -> List[Dict[str, Any]
                 "plant": plant_s,
                 "store_classification": band,
                 "lead_time": float(lead_days),
-                "current_qty": int(round(start_stock)),
+                "current_qty": int(round(current_qty)),
                 "stock_weeks": float(inv_display),
-                "shortage_qty": est_short if band == "부족 매장" else None,
-                "surplus_qty": est_surplus if band == "여유 매장" else None,
+                "shortage_qty": est_short,
+                "surplus_qty": est_surplus,
             }
         )
 
