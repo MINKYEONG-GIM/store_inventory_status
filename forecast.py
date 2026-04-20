@@ -564,6 +564,7 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
     # 미래 주차별 item_plc 비중 붙이기
     expanded = attach_plc_fields_by_itemcode_weekno(expanded, plc_year)
 
+    
     # sku, plant별 최근 2주 actual 판매량 기준
     # 현재 주차 기준 직전 2주
     def get_prev_two_year_weeks(curr_year, curr_week):
@@ -614,52 +615,30 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
 
         return recent_2w
     
-    # sku, plant 기준 목록
-    sku_plant_keys = sku_year[["sku", "plant"]].drop_duplicates().copy()
-    target_week_df = pd.DataFrame({"week_no": target_weeks})
-    
-    # 모든 sku, plant 에 대해 n-2, n-1 주차 강제 생성
-    sku_plant_keys["key"] = 1
-    target_week_df["key"] = 1
-    
-    recent_2w_base = (
-        sku_plant_keys
-        .merge(target_week_df, on="key", how="inner")
-        .drop(columns=["key"])
-    )
-    
-    # 실제 판매량 붙이기
-    recent_actual_sales = (
-        sku_year[["sku", "plant", "week_no", "SALE_QTY"]]
-        .copy()
-    )
-    
-    recent_actual_2w = recent_2w_base.merge(
-        recent_actual_sales,
-        on=["sku", "plant", "week_no"],
-        how="left"
-    )
-    
-    # 판매 row 없으면 0 처리
-    recent_actual_2w["SALE_QTY"] = pd.to_numeric(
-        recent_actual_2w["SALE_QTY"], errors="coerce"
-    ).fillna(0)
-    
-    # 최근 2주 합/평균 계산
-    recent_actual_2w = (
-        recent_actual_2w
-        .groupby(["sku", "plant"], as_index=False)
-        .agg(
-            recent_2w_sale_sum=("SALE_QTY", "sum"),
-            recent_2w_sale_avg=("SALE_QTY", "mean")
-        )
-    )
 
+    recent_actual_2w = build_recent_2w_actual(
+        sku_recent_source,
+        target_year,
+        curr_week
+    )
+    
     expanded = expanded.merge(
         recent_actual_2w,
         on=["sku", "plant"],
         how="left"
     )
+
+
+    
+    expanded["recent_2w_sale_avg"] = pd.to_numeric(
+        expanded["recent_2w_sale_avg"], errors="coerce"
+    ).fillna(0)
+    
+    expanded["recent_2w_sale_sum"] = pd.to_numeric(
+        expanded["recent_2w_sale_sum"], errors="coerce"
+    ).fillna(0)
+
+    
 
     
     def round_half_up(x):
@@ -692,13 +671,11 @@ def build_forecast_rows(sku_df: pd.DataFrame, plc_df: pd.DataFrame, target_year:
         if pd.isna(recent_2w_sale_avg):
             recent_2w_sale_avg = 0.0
 
-        ratio = float(week_ratio)
-
-        # 120, 85 같은 퍼센트값이면 보정
-        if ratio > 10:
-            ratio = ratio / 100.0
-
-        raw = float(recent_2w_sale_avg) * ratio
+        week_ratio_pct = float(week_ratio)
+        avg_week_ratio_pct = 100.0 / 52.0
+        seasonality_multiplier = week_ratio_pct / avg_week_ratio_pct
+        
+        raw = float(recent_2w_sale_avg) * seasonality_multiplier
 
         if raw < 0:
             raw = 0.0
