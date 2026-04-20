@@ -321,9 +321,8 @@ if run_button:
 
     st.write(f"총 행 수: {len(result_df)}")
 
-    if st.button("sku_weekly_forecast_2에 저장"):
-        with st.spinner("기존 스타일 데이터 삭제 후 저장 중..."):
-            delete_target_style(style_code.strip())
-            inserted_count = insert_target_rows(result_df)
+    with st.spinner("기존 스타일 데이터 삭제 후 저장 중..."):
+        delete_target_style(style_code.strip())
+        inserted_count = insert_target_rows(result_df)
 
-        st.success(f"완료: {inserted_count}건 적재되었습니다.")
+    st.success(f"완료: {inserted_count}건 적재되었습니다.")
