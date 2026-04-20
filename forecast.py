@@ -437,27 +437,29 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
 
             if not is_forecast:
                 available_stock = current_base + ipgo_qty
-            
-                shortage = max(0.0, sale_qty - available_stock)
                 remain = max(0.0, available_stock - sale_qty)
             
                 new_base[idx] = int(round(remain))
-                new_loss[idx] = 0  # actual은 loss 누적 안함
+                new_loss[idx] = 0
             
                 prev_remain = remain
                 prev_loss = 0
+            
             else:
-                # 예측 행부터는 전주 남은 재고를 사용
-                start_stock = 0.0 if prev_remain is None else float(prev_remain)
+                if prev_remain is None:
+                    start_stock = current_base   # ⭐ 핵심 수정
+                else:
+                    start_stock = float(prev_remain)
+            
                 available_stock = start_stock + ipgo_qty
-
+            
                 shortage = max(0.0, sale_qty - available_stock)
                 remain = max(0.0, available_stock - sale_qty)
                 curr_loss = prev_loss + shortage
-
+            
                 new_base[idx] = int(round(remain))
                 new_loss[idx] = int(round(curr_loss))
-
+            
                 prev_remain = remain
                 prev_loss = curr_loss
 
