@@ -232,6 +232,8 @@ def build_forecast_rows(actual_df: pd.DataFrame, item_plc_df: pd.DataFrame):
 
             pred_sale = estimated_total_sales * (future_ratio / 100.0)
             pred_sale = round_sale(pred_sale)
+            base_stock = 0
+            loss = max(0, pred_sale - base_stock)
 
             result_rows.append({
                 "year_week": f"2026-{future_week:02d}",  # 필요하면 실제 연도로 바꾸기
@@ -244,7 +246,7 @@ def build_forecast_rows(actual_df: pd.DataFrame, item_plc_df: pd.DataFrame):
                 "last_year_ratio_pct": future_ratio,
                 "BASE_STOCK_QTY": 0,
                 "is_forecast": True,
-                "loss": 0,
+                "loss": loss,
                 "IPGO_QTY": 0,
                 "shape_type": plc_info["shape_type"],
                 "week_no": future_week,
