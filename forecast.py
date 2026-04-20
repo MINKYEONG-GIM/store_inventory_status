@@ -436,7 +436,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
             current_loss = 0.0 if pd.isna(current_loss) else float(current_loss)
 
             if not is_forecast:
-                available_stock = current_base + ipgo_qty
+                available_stock = current_base
                 remain = max(0.0, available_stock - sale_qty)
             
                 new_base[idx] = int(round(remain))
