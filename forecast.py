@@ -222,6 +222,7 @@ def build_forecast_rows(actual_df: pd.DataFrame, item_plc_df: pd.DataFrame):
             continue
 
         last_actual_week = int(actual_only["week_no"].max())
+        prev_base_stock = int(actual_only.sort_values("week_no").iloc[-1]["BASE_STOCK_QTY"])
 
         # 최근 2주 actual
         recent2 = actual_only.sort_values("week_no").tail(2).copy()
@@ -249,8 +250,10 @@ def build_forecast_rows(actual_df: pd.DataFrame, item_plc_df: pd.DataFrame):
 
             pred_sale = estimated_total_sales * (future_ratio / 100.0)
             pred_sale = round_sale(pred_sale)
-            base_stock = 0
+            base_stock = max(0, prev_base_stock - pred_sale)
             loss = max(0, pred_sale - base_stock)
+
+            prev_base_stock = base_stock
 
             result_rows.append({
                 "year_week": f"2026-{future_week:02d}",  # 필요하면 실제 연도로 바꾸기
