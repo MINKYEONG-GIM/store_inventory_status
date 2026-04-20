@@ -124,11 +124,28 @@ def build_item_plc_map(item_plc_df: pd.DataFrame):
 
 
 def get_plc_info(plc_map, item_code, week_no):
-    key = (str(item_code), int(week_no))
+    if pd.isna(week_no):
+        return {
+            "last_year_ratio_pct": 0,
+            "shape_type": None,
+            "stage": None,
+            "peak_week": None,
+        }
+
+    week_no = int(week_no)
+    item_code = str(item_code).strip()
+
+    # 1️⃣ 먼저 item_code로 찾기
+    key = (item_code, week_no)
     if key in plc_map:
         return plc_map[key]
 
-    # item_code 없으면 0으로 처리
+    # 2️⃣ 없으면 "평균"으로 fallback
+    avg_key = ("평균", week_no)
+    if avg_key in plc_map:
+        return plc_map[avg_key]
+
+    # 3️⃣ 그래도 없으면 0
     return {
         "last_year_ratio_pct": 0,
         "shape_type": None,
