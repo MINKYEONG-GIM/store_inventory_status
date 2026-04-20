@@ -222,8 +222,16 @@ def build_forecast_rows(actual_df: pd.DataFrame, item_plc_df: pd.DataFrame):
             continue
 
         last_actual_week = int(actual_only["week_no"].max())
-        prev_base_stock = int(actual_only.sort_values("week_no").iloc[-1]["BASE_STOCK_QTY"])
+        last_row = actual_only.sort_values("week_no").iloc[-1]
+        
+        last_base_stock = safe_int(last_row["BASE_STOCK_QTY"], 0)
+        last_sale_qty = safe_int(last_row["SALE_QTY"], 0)
+        last_ipgo_qty = safe_int(last_row["IPGO_QTY"], 0)
+        
+        prev_base_stock = max(0, last_base_stock + last_ipgo_qty - last_sale_qty)
 
+
+        
         # 최근 2주 actual
         recent2 = actual_only.sort_values("week_no").tail(2).copy()
 
