@@ -8,19 +8,19 @@ except ImportError:
     create_client = None
 
 
-RAW_FILE_TABLE = "RAW FILE"
+RAW_FILE_TABLE = "raw_file"
 SKU_WEEKLY_FORECAST_TABLE = "sku_weekly_forecast"
 
 RAW_FILE_SELECT = """
 id,
 CALDAY,
 PLANT,
-sku,
-style_code,
+SKU,
+STYLE_CODE,
 STOCK_CHANGE_QTY,
 SALE_QTY,
 IPGO_QTY,
-item_code
+ITEM_CODE
 """.replace("\n", "").replace(" ", "")
 
 
@@ -173,7 +173,7 @@ def load_raw_file_df(client, style_codes: list[str] | None = None) -> pd.DataFra
     df["year_week"] = df["CALDAY"].apply(calday_to_year_week)
     df["week_no"] = df["year_week"].apply(year_week_to_week_no)
 
-    for col in ["PLANT", "sku", "style_code", "item_code"]:
+    for col in ["PLANT", "SKU", "STYLE_CODE", "ITEM_CODE"]:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else None)
 
@@ -181,14 +181,14 @@ def load_raw_file_df(client, style_codes: list[str] | None = None) -> pd.DataFra
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    df = df.dropna(subset=["CALDAY_DT", "year_week", "PLANT", "sku"])
+    df = df.dropna(subset=["CALDAY_DT", "year_week", "PLANT", "SKU"])
 
     if style_codes:
-        df = df[df["style_code"].isin(style_codes)].copy()
+        df = df[df["STYLE_CODE"].isin(style_codes)].copy()
 
     weekly_df = (
         df.groupby(
-            ["PLANT", "sku", "style_code", "item_code", "year_week", "week_no"],
+            ["PLANT", "SKU", "STYLE_CODE", "ITEM_CODE", "year_week", "week_no"],
             dropna=False,
             as_index=False
         )
@@ -199,20 +199,20 @@ def load_raw_file_df(client, style_codes: list[str] | None = None) -> pd.DataFra
     )
 
     weekly_df = weekly_df.sort_values(
-        ["PLANT", "sku", "year_week"]
+        ["PLANT", "SKU", "year_week"]
     ).reset_index(drop=True)
 
     weekly_df["BASE_STOCK_QTY"] = (
-        weekly_df.groupby(["PLANT", "sku"])["IPGO_QTY"].cumsum()
-        - weekly_df.groupby(["PLANT", "sku"])["SALE_QTY"].cumsum()
+        weekly_df.groupby(["PLANT", "SKU"])["IPGO_QTY"].cumsum()
+        - weekly_df.groupby(["PLANT", "SKU"])["SALE_QTY"].cumsum()
     )
 
     return weekly_df
 
 def build_forecast_rows(raw_df: pd.DataFrame) -> list:
     """
-    RAW FILE 각 행을 거의 그대로 sku_weekly_forecast로 옮김.
-    추가: year_week, week_no, sku에서 추출한 item_code.
+    raw_file 각 행을 거의 그대로 sku_weekly_forecast로 옮김.
+    추가: year_week, week_no, SKU에서 추출한 item_code.
     """
     if raw_df.empty:
         return []
@@ -221,13 +221,13 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
 
     for _, r in raw_df.iterrows():
         plant = r.get("PLANT")
-        sku = r.get("sku")
-        item_code = r.get("item_code") or extract_item_code(sku)
+        sku = r.get("SKU")
+        item_code = r.get("ITEM_CODE") or extract_item_code(sku)
 
         rows.append({
             "year_week": r.get("year_week"),
             "SALE_QTY": to_float_or_none(r.get("SALE_QTY")),
-            "style_code": str(r.get("style_code")).strip() if pd.notna(r.get("style_code")) else None,
+            "style_code": str(r.get("STYLE_CODE")).strip() if pd.notna(r.get("STYLE_CODE")) else None,
             "sku": str(sku).strip() if pd.notna(sku) else None,
             "plant": str(plant).strip() if pd.notna(plant) else None,
             "item_code": item_code,
@@ -242,7 +242,7 @@ def build_forecast_rows(raw_df: pd.DataFrame) -> list:
 def run_job(style_codes: list[str], replace_mode: bool):
     client = get_supabase_client()
 
-    st.write("1. RAW FILE 불러오는 중...")
+    st.write("1. raw_file 불러오는 중...")
     raw_df = load_raw_file_df(client, style_codes=style_codes)
     st.write(f"선택된 스타일 rows: {len(raw_df):,}")
 
