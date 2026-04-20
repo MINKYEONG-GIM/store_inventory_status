@@ -441,7 +441,7 @@ def apply_base_stock_and_loss(final_df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     start_stock = prev_remain
             
-                available_stock = start_stock + ipgo_qty
+                available_stock = start_stock
             
                 remain = max(0.0, available_stock - sale_qty)
             
