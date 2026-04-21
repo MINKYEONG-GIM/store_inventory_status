@@ -3,6 +3,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
+import re
 
 # =========================
 # 환경설정
@@ -302,21 +303,23 @@ def delete_target_style(style_code: str):
     supabase.table(TARGET_TABLE).delete().eq("style_code", style_code).execute()
 
 
-def insert_target_rows(df: pd.DataFrame):
+def upsert_target_rows(df: pd.DataFrame):
     if df.empty:
         return 0
 
     rows = df.to_dict(orient="records")
-
     batch_size = 500
-    inserted = 0
+    affected = 0
 
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
-        supabase.table(TARGET_TABLE).insert(batch).execute()
-        inserted += len(batch)
+        supabase.table(TARGET_TABLE).upsert(
+            batch,
+            on_conflict="style_code,sku,plant,week_no"
+        ).execute()
+        affected += len(batch)
 
-    return inserted
+    return affected
 
 
 # =========================
@@ -327,33 +330,31 @@ st.set_page_config(page_title="SKU Weekly Forecast Builder", layout="wide")
 st.title("sku_weekly_forecast_2 적재")
 st.write("스타일코드를 입력하면 해당 스타일의 실제 데이터는 그대로 가져오고, 마지막 실제 주차 다음 주부터 52주차까지 예측해서 sku_weekly_forecast_2에 적재합니다.")
 
-style_code = st.text_input("스타일코드 입력", value="")
+
+style_input = st.text_area("스타일코드 입력 (콤마 또는 줄바꿈)", value="")
+style_codes = [s.strip() for s in re.split(r"[\n,]+", style_input) if s.strip()]
 
 run_button = st.button("적재 실행")
 
 if run_button:
-    if not style_code.strip():
+    if not style_codes:
         st.error("스타일코드를 입력하세요.")
         st.stop()
 
-    with st.spinner("데이터 조회 중..."):
-        actual_df = load_actual_style_data(style_code.strip())
-        item_plc_df = load_item_plc()
+    total_inserted = 0
 
-    if actual_df.empty:
-        st.warning("해당 스타일코드의 실제 데이터가 sku_weekly_forecast 테이블에 없습니다.")
-        st.stop()
+    item_plc_df = load_item_plc()
 
-    with st.spinner("예측 데이터 생성 중..."):
-        result_df = build_forecast_rows(actual_df, item_plc_df)
-
-    st.subheader("미리보기")
-    st.dataframe(result_df, use_container_width=True)
-
-    st.write(f"총 행 수: {len(result_df)}")
-
-    with st.spinner("기존 스타일 데이터 삭제 후 저장 중..."):
-        delete_target_style(style_code.strip())
-        inserted_count = insert_target_rows(result_df)
-
-    st.success(f"완료: {inserted_count}건 적재되었습니다.")
+    for style_code in style_codes:
+        with st.spinner(f"{style_code} 처리 중..."):
+    
+            actual_df = load_actual_style_data(style_code)
+            if actual_df.empty:
+                st.warning(f"{style_code}: 데이터 없음")
+                continue
+    
+            result_df = build_forecast_rows(actual_df, item_plc_df)
+            inserted_count = upsert_target_rows(result_df)
+    
+            total_inserted += inserted_count
+            st.success(f"{style_code}: {inserted_count}건 저장 완료")
