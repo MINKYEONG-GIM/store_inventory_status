@@ -275,134 +275,179 @@ def build_dashboard_df(forecast_df: pd.DataFrame, style_code_filter: str = "") -
             "w2_reorder", "w2_lackplant",
             "w3_reorder", "w3_lackplant",
             "w4_reorder", "w4_lackplant",
+            "base_stock", "w1_sale_prev", "w2_sale_prev",
         ])
 
     f = forecast_df.copy()
 
+    # ---------------------------
     # style_code 필터
+    # ---------------------------
     style_code_filter = normalize_text(style_code_filter)
     if style_code_filter:
         f = f[f["style_code"] == style_code_filter].copy()
 
     if f.empty:
         return pd.DataFrame(columns=[
-            "style_code", "sku", "plant", "total_reorder",
+            "style_code", "sku", "plant",
+            "total_reorder",
             "w0_reorder", "w0_lackplant",
             "w1_reorder", "w1_lackplant",
             "w2_reorder", "w2_lackplant",
             "w3_reorder", "w3_lackplant",
             "w4_reorder", "w4_lackplant",
+            "base_stock", "w1_sale_prev", "w2_sale_prev",
         ])
 
-    today_key = iso_year_week(datetime.today())
-    today_date = parse_year_week_to_monday(today_key)
-    target_weeks = get_week_keys_from_today(weeks=5)
 
-    # loss는 부족 수량으로 사용. 음수 방지
-    f["loss"] = pd.to_numeric(f["loss"], errors="coerce").fillna(0)
-    f["loss"] = f["loss"].clip(lower=0)
 
-    # 현재 주차 이후 전체 리오더 합계
+    
+    # ---------------------------
+    # 기본 정리
+    # ---------------------------
+    for col in ["style_code", "sku", "plant", "year_week"]:
+        f[col] = f[col].astype(str).replace("nan", "").str.strip()
+
+    f["loss"] = pd.to_numeric(f["loss"], errors="coerce").fillna(0).clip(lower=0)
+    f["sale_qty"] = pd.to_numeric(f["sale_qty"], errors="coerce").fillna(0)
+    f["BASE_STOCK_QTY"] = pd.to_numeric(f["BASE_STOCK_QTY"], errors="coerce").fillna(0)
+
+    # ---------------------------
+    # 주차 계산
+    # ---------------------------
+    today = datetime.today()
+    this_week = iso_year_week(today)
+
+    this_monday = date.fromisocalendar(today.isocalendar().year, today.isocalendar().week, 1)
+    prev1_dt = pd.Timestamp(this_monday) - pd.Timedelta(weeks=1)
+    prev2_dt = pd.Timestamp(this_monday) - pd.Timedelta(weeks=2)
+
+    prev1_week = f"{prev1_dt.isocalendar().year}-{prev1_dt.isocalendar().week:02d}"
+    prev2_week = f"{prev2_dt.isocalendar().year}-{prev2_dt.isocalendar().week:02d}"
+
+    target_weeks = get_week_keys_from_today(5)
+
+    # ---------------------------
+    # total_reorder (미래 전체 loss 합)
+    # ---------------------------
+    f["year_week_date"] = f["year_week"].apply(parse_year_week_to_monday)
+    this_week_date = parse_year_week_to_monday(this_week)
+
     future_all = f[f["year_week_date"].notna()].copy()
-    if today_date is not None:
-        future_all = future_all[future_all["year_week_date"] >= today_date].copy()
+    if this_week_date:
+        future_all = future_all[future_all["year_week_date"] >= this_week_date]
 
     total_reorder_df = (
-        future_all.groupby(["style_code", "sku", "plant"], dropna=False)["loss"]
+        future_all.groupby(["style_code", "sku", "plant"])["loss"]
         .sum()
         .reset_index()
         .rename(columns={"loss": "total_reorder"})
     )
 
-    # W+0 ~ W+4 대상 주차만
-    f_5w = f[f["year_week"].isin(target_weeks)].copy()
+    # ---------------------------
+    # W+0 ~ W+4
+    # ---------------------------
+    f_5w = f[f["year_week"].isin(target_weeks)]
 
     grouped = (
-        f_5w.groupby(["style_code", "sku", "plant", "year_week"], dropna=False)["loss"]
+        f_5w.groupby(["style_code", "sku", "plant", "year_week"])["loss"]
         .sum()
         .reset_index()
     )
 
-    # 부족매장수 = 같은 sku, 같은 주차에서 loss > 0인 plant 수
-    lackplant_df = (
+    lack_df = (
         grouped.assign(is_lack=lambda x: (x["loss"] > 0).astype(int))
-        .groupby(["sku", "year_week"], dropna=False)["is_lack"]
+        .groupby(["sku", "year_week"])["is_lack"]
         .sum()
         .reset_index()
     )
 
-    lackplant_map = {
-        (normalize_text(r["sku"]), normalize_text(r["year_week"])): int(r["is_lack"])
-        for _, r in lackplant_df.iterrows()
+    lack_map = {
+        (r["sku"], r["year_week"]): int(r["is_lack"])
+        for _, r in lack_df.iterrows()
     }
 
-    # base row
-    base = (
-        f[["style_code", "sku", "plant"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
+    base = f[["style_code", "sku", "plant"]].drop_duplicates()
 
-    result = base.merge(
-        total_reorder_df,
-        on=["style_code", "sku", "plant"],
-        how="left"
-    )
+    result = base.merge(total_reorder_df, on=["style_code", "sku", "plant"], how="left")
 
-    # W+0 ~ W+4
     for i, yw in enumerate(target_weeks):
-        reorder_col = f"w{i}_reorder"
-        lack_col = f"w{i}_lackplant"
+        r_col = f"w{i}_reorder"
+        l_col = f"w{i}_lackplant"
 
-        tmp = grouped[grouped["year_week"] == yw].copy()
-        tmp = tmp.rename(columns={"loss": reorder_col})
+        tmp = grouped[grouped["year_week"] == yw].rename(columns={"loss": r_col})
 
         result = result.merge(
-            tmp[["style_code", "sku", "plant", reorder_col]],
+            tmp[["style_code", "sku", "plant", r_col]],
             on=["style_code", "sku", "plant"],
             how="left"
         )
 
-        result[lack_col] = result["sku"].apply(
-            lambda x: lackplant_map.get((normalize_text(x), yw), 0)
-        )
+        result[l_col] = result["sku"].apply(lambda x: lack_map.get((x, yw), 0))
 
-    # null -> 0
-    for col in [
+    # ---------------------------
+    # 🔥 추가된 부분 (여기 핵심)
+    # ---------------------------
+
+    # base_stock (이번주)
+    base_stock_df = (
+        f[f["year_week"] == this_week]
+        .groupby(["style_code", "sku", "plant"])["BASE_STOCK_QTY"]
+        .max()
+        .reset_index()
+        .rename(columns={"BASE_STOCK_QTY": "base_stock"})
+    )
+
+    # 지난주 판매
+    prev1_df = (
+        f[f["year_week"] == prev1_week]
+        .groupby(["style_code", "sku", "plant"])["sale_qty"]
+        .sum()
+        .reset_index()
+        .rename(columns={"sale_qty": "w1_sale_prev"})
+    )
+
+    # 2주 전 판매
+    prev2_df = (
+        f[f["year_week"] == prev2_week]
+        .groupby(["style_code", "sku", "plant"])["sale_qty"]
+        .sum()
+        .reset_index()
+        .rename(columns={"sale_qty": "w2_sale_prev"})
+    )
+
+    # merge
+    result = result.merge(base_stock_df, on=["style_code", "sku", "plant"], how="left")
+    result = result.merge(prev1_df, on=["style_code", "sku", "plant"], how="left")
+    result = result.merge(prev2_df, on=["style_code", "sku", "plant"], how="left")
+
+    # ---------------------------
+    # null 처리
+    # ---------------------------
+    cols = [
         "total_reorder",
         "w0_reorder", "w0_lackplant",
         "w1_reorder", "w1_lackplant",
         "w2_reorder", "w2_lackplant",
         "w3_reorder", "w3_lackplant",
         "w4_reorder", "w4_lackplant",
-    ]:
-        if col in result.columns:
-            result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
-
-    # 정수형 정리
-    int_cols = [
-        "total_reorder",
-        "w0_reorder", "w0_lackplant",
-        "w1_reorder", "w1_lackplant",
-        "w2_reorder", "w2_lackplant",
-        "w3_reorder", "w3_lackplant",
-        "w4_reorder", "w4_lackplant",
+        "base_stock", "w1_sale_prev", "w2_sale_prev",
     ]
-    for col in int_cols:
-        result[col] = result[col].round(0).astype(int)
+
+    for c in cols:
+        result[c] = pd.to_numeric(result[c], errors="coerce").fillna(0).round(0).astype(int)
 
     result = result.sort_values(["style_code", "sku", "plant"]).reset_index(drop=True)
-
     return result[[
-        "style_code", "sku", "plant", "total_reorder",
+        "style_code", "sku", "plant",
+        "total_reorder",
         "w0_reorder", "w0_lackplant",
         "w1_reorder", "w1_lackplant",
         "w2_reorder", "w2_lackplant",
         "w3_reorder", "w3_lackplant",
         "w4_reorder", "w4_lackplant",
+        "base_stock", "w1_sale_prev", "w2_sale_prev",
     ]]
-
-
 # -------------------------------------------------
 # dashboard 적재
 # -------------------------------------------------
