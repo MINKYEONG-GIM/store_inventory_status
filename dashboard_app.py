@@ -1,6 +1,6 @@
 import os
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -12,7 +12,7 @@ except ImportError:
 
 
 # -------------------------------------------------
-# 기본 설정
+# 페이지 기본 설정
 # -------------------------------------------------
 st.set_page_config(
     page_title="SKU Reorder Dashboard",
@@ -20,8 +20,143 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("SKU 발주 현황 대시보드")
-st.caption("상단은 스타일별 요약, 하단은 선택한 스타일의 SKU 상세 조회 화면")
+
+# -------------------------------------------------
+# 공통 유틸
+# -------------------------------------------------
+def inject_custom_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(20,40,72,0.55), transparent 28%),
+                radial-gradient(circle at top right, rgba(0,180,255,0.08), transparent 24%),
+                linear-gradient(180deg, #06111f 0%, #071525 100%);
+            color: #e9f3ff;
+        }
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 1.0rem;
+            max-width: 1440px;
+        }
+        .top-wrap {
+            margin-bottom: 12px;
+        }
+        .top-tabs {
+            display: flex;
+            gap: 28px;
+            margin: 14px 0 10px 0;
+            border-bottom: 1px solid rgba(110, 160, 210, 0.18);
+            padding-bottom: 8px;
+        }
+        .top-tab-active {
+            color: #4ad4ff;
+            font-weight: 700;
+            border-bottom: 2px solid #37cfff;
+            padding-bottom: 8px;
+        }
+        .top-tab {
+            color: #9ab4d6;
+            font-weight: 600;
+            padding-bottom: 8px;
+        }
+        .metric-card {
+            background: rgba(8, 21, 38, 0.86);
+            border: 1px solid rgba(122, 172, 228, 0.14);
+            border-radius: 14px;
+            padding: 14px 16px;
+            min-height: 88px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+        }
+        .metric-label {
+            color: #8aa6c7;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+        .metric-value {
+            color: #f2f7ff;
+            font-size: 30px;
+            font-weight: 800;
+            line-height: 1;
+        }
+        .metric-unit {
+            color: #9fb6d2;
+            font-size: 12px;
+            margin-left: 4px;
+        }
+        .bar-card {
+            background: rgba(8, 21, 38, 0.86);
+            border: 1px solid rgba(122, 172, 228, 0.14);
+            border-radius: 14px;
+            padding: 14px 16px;
+            min-height: 88px;
+        }
+        .bar-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(255,255,255,0.07);
+            border-radius: 999px;
+            overflow: hidden;
+            margin-top: 12px;
+        }
+        .bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00c8ff 0%, #66e8ff 100%);
+            border-radius: 999px;
+        }
+        .section-title {
+            color: #e8f3ff;
+            font-size: 26px;
+            font-weight: 800;
+            margin: 2px 0 4px 0;
+        }
+        .subtle {
+            color: #8ea8c7;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid rgba(122, 172, 228, 0.14);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+        .sidebox {
+            background: rgba(8, 21, 38, 0.92);
+            border: 1px solid rgba(122, 172, 228, 0.14);
+            border-radius: 14px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .chip {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            margin-right: 6px;
+            background: rgba(55, 207, 255, 0.12);
+            color: #71deff;
+            border: 1px solid rgba(55, 207, 255, 0.28);
+        }
+        .danger-chip {
+            background: rgba(255, 92, 92, 0.12);
+            color: #ff8080;
+            border: 1px solid rgba(255, 92, 92, 0.28);
+        }
+        .select-hint {
+            color: #7d95b3;
+            font-size: 12px;
+            margin-top: -2px;
+            margin-bottom: 10px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_custom_css()
 
 
 # -------------------------------------------------
@@ -29,9 +164,7 @@ st.caption("상단은 스타일별 요약, 하단은 선택한 스타일의 SKU 
 # -------------------------------------------------
 def get_supabase_client():
     if _create_supabase_client is None:
-        raise ImportError(
-            "supabase 패키지가 없습니다. requirements.txt에 supabase를 추가하세요."
-        )
+        raise ImportError("supabase 패키지가 없습니다. requirements.txt에 supabase를 추가하세요.")
 
     url = ""
     key = ""
@@ -41,7 +174,6 @@ def get_supabase_client():
             url = str(st.secrets.get("SUPABASE_URL") or "").strip()
             key = str(st.secrets.get("SUPABASE_KEY") or "").strip()
 
-            # 네가 올린 예시 파일처럼 [supabase] 블록도 같이 지원
             if (not url or not key) and "supabase" in st.secrets:
                 sec = dict(st.secrets["supabase"])
                 url = str(sec.get("url") or url or "").strip()
@@ -66,48 +198,28 @@ def get_supabase_client():
         ).strip()
 
     if not url or not key:
-        raise ValueError(
-            "Supabase 접속 정보가 없습니다. SUPABASE_URL, SUPABASE_KEY를 secrets 또는 환경변수에 설정하세요."
-        )
+        raise ValueError("Supabase 접속 정보가 없습니다. SUPABASE_URL, SUPABASE_KEY를 설정하세요.")
 
     return _create_supabase_client(url, key)
 
 
-
-def fetch_supabase_table_all_rows(
-    client,
-    table_name: str,
-    batch_size: int = 1000,
-) -> List[Dict[str, Any]]:
+def fetch_supabase_table_all_rows(client, table_name: str, batch_size: int = 1000) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     off = 0
 
     while True:
         try:
-            resp = (
-                client.table(table_name)
-                .select("*")
-                .limit(batch_size)
-                .offset(off)
-                .execute()
-            )
+            resp = client.table(table_name).select("*").limit(batch_size).offset(off).execute()
         except Exception:
-            resp = (
-                client.table(table_name)
-                .select("*")
-                .range(off, off + batch_size - 1)
-                .execute()
-            )
+            resp = client.table(table_name).select("*").range(off, off + batch_size - 1).execute()
 
-        chunk = resp.data if resp.data else []
+        chunk = resp.data if getattr(resp, "data", None) else []
         if not chunk:
             break
 
         rows.extend(chunk)
-
         if len(chunk) < batch_size:
             break
-
         off += batch_size
 
     return rows
@@ -117,63 +229,72 @@ def fetch_supabase_table_all_rows(
 # 데이터 로드
 # -------------------------------------------------
 @st.cache_data(ttl=300)
-def load_data() -> pd.DataFrame:
+def load_weekly_forecast() -> pd.DataFrame:
     client = get_supabase_client()
-    rows = fetch_supabase_table_all_rows(client, "store_inventory_status_step2")
+    rows = fetch_supabase_table_all_rows(client, "sku_weekly_forecast_2")
 
+    columns = [
+        "id", "created_at", "year_week", "sale_qty", "stage", "style_code", "sku",
+        "is_peak_week", "plant", "last_year_ratio_pct", "BASE_STOCK_QTY", "is_forecast",
+        "loss", "IPGO_QTY", "shape_type", "week_no", "sale_end_date",
+    ]
     if not rows:
-        return pd.DataFrame(
-            columns=[
-                "id",
-                "created_at",
-                "style_code",
-                "sku",
-                "shortage_store_count",
-                "lead_time",
-                "reorder_needed",
-                "reorder_urgency",
-                "order_due_date",
-                "center_stock_qty",
-                "surplus_qty",
-                "shortage_qty",
-                "shortage_start_week",
-                "total_reorder_amount",
-                "due_date_reorder_amount",
-                "sale_start_date",
-                "total_sale_qty",
-                "monthly_code",
-            ]
-        )
+        return pd.DataFrame(columns=columns)
 
     df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+    df["sale_end_date"] = pd.to_datetime(df.get("sale_end_date"), errors="coerce")
 
-    if "created_at" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-        df = df.sort_values(
-            by=["created_at", "style_code", "sku"],
-            ascending=[False, True, True],
-            na_position="last",
-        )
+    numeric_cols = ["sale_qty", "last_year_ratio_pct", "BASE_STOCK_QTY", "loss", "IPGO_QTY", "week_no"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    for col in ["style_code", "sku", "plant", "stage", "shape_type", "year_week"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace("nan", "").str.strip()
+
+    if "is_forecast" in df.columns:
+        df["is_forecast"] = df["is_forecast"].apply(normalize_boolean)
+    if "is_peak_week" in df.columns:
+        df["is_peak_week"] = df["is_peak_week"].apply(normalize_boolean)
+
+    df["year"] = df["year_week"].str[:4]
     return df
 
 
 @st.cache_data(ttl=300)
-def load_forecast_data() -> pd.DataFrame:
+def load_weekly_stock() -> pd.DataFrame:
     client = get_supabase_client()
-    rows = fetch_supabase_table_all_rows(client, "sku_weekly_forecast_2")
+    rows = fetch_supabase_table_all_rows(client, "weekly_stock")
 
+    columns = [
+        "id", "created_at", "year_week", "sku", "total_sale_qty", "total_base_stock_qty",
+        "total_ipgo_qty", "total_loss", "cumulative_loss", "total_center_stock",
+    ]
     if not rows:
-        return pd.DataFrame(
-            columns=["year_week", "sale_qty", "stage", "style_code", "sku", "plant", "week_no"]
-        )
+        return pd.DataFrame(columns=columns)
 
     df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+    for col in [
+        "total_sale_qty", "total_base_stock_qty", "total_ipgo_qty", "total_loss",
+        "cumulative_loss", "total_center_stock",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    for col in ["sku", "year_week"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace("nan", "").str.strip()
+
+    df["year"] = df["year_week"].str[:4]
+    df["week_no_num"] = pd.to_numeric(df["year_week"].str[-2:], errors="coerce")
     return df
 
 
 # -------------------------------------------------
-# 분류 로직
+# 파생 계산
 # -------------------------------------------------
 def normalize_boolean(value) -> bool:
     if pd.isna(value):
@@ -185,658 +306,365 @@ def normalize_boolean(value) -> bool:
     return bool(value)
 
 
-
-def compute_days_left(order_due_date: Optional[pd.Timestamp]) -> Optional[int]:
-    if pd.isna(order_due_date):
-        return None
-    today = date.today()
-    return (pd.to_datetime(order_due_date).date() - today).days
+def safe_num(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(0)
 
 
-
-def classify_row(row: pd.Series) -> str:
-    reorder_needed = normalize_boolean(row.get("reorder_needed"))
-    urgency = str(row.get("reorder_urgency") or "").strip()
-    days_left = row.get("days_left")
-    shortage_qty = row.get("shortage_qty")
-
-    shortage_qty = 0 if pd.isna(shortage_qty) else float(shortage_qty)
-
-    # 발주기한이 내일(오늘+1일) 미만이면 발주 시점 경과 (날짜 기준 오늘 포함)
-    if days_left is not None and days_left < 1:
-        return "발주시점 지남"
-
-    # 1. 영원히 발주 안 해도 되는 후보
-    # 실무에서는 완전 확정 개념은 아니므로 장기 불필요로 표시
-    if (not reorder_needed) and shortage_qty <= 0:
-        if pd.isna(row.get("order_due_date")):
-            return "장기 불필요"
-
-    # 2. 즉시 발주
-    if reorder_needed:
-        if urgency in ["긴급", "urgent", "critical"]:
-            return "즉시 발주"
-        if days_left is not None and days_left < 0:
-            return "즉시 발주"
-        if days_left is not None and days_left <= 3:
-            return "즉시 발주"
-
-    # 3. 곧 발주
-    if reorder_needed:
-        if urgency in ["주의", "보통", "normal", "warning"]:
-            return "곧 발주"
-        if days_left is not None and 4 <= days_left <= 14:
-            return "곧 발주"
-        return "발주 검토"
-
-    # 4. 발주 불필요
-    return "발주 불필요"
-
-
-
-def priority_score(row: pd.Series) -> int:
-    category = row.get("action_category")
-    days_left = row.get("days_left")
-
-    if category == "발주시점 지남":
-        base = 500
-    elif category == "즉시 발주":
-        base = 400
-    elif category == "곧 발주":
-        base = 300
-    elif category == "발주 검토":
-        base = 200
-    elif category == "발주 불필요":
-        base = 100
-    else:
-        base = 0
-
-    if days_left is None:
-        return base
-
-    # 날짜가 더 급할수록 점수 높게
-    return base + max(0, 30 - days_left)
-
-
-
-def _to_float(value: Any) -> float:
-    x = pd.to_numeric(value, errors="coerce")
-    if pd.isna(x):
-        return 0.0
-    return float(x)
-
-
-
-def _current_iso_week() -> int:
-    return int(datetime.today().isocalendar().week)
-
-
-
-def compute_sku_metrics_from_forecast(forecast_df: pd.DataFrame, dashboard_df: pd.DataFrame) -> pd.DataFrame:
-    if forecast_df.empty:
+def get_latest_sku_snapshot(weekly_stock_df: pd.DataFrame) -> pd.DataFrame:
+    if weekly_stock_df.empty:
         return pd.DataFrame(columns=[
-            "sku",
-            "season_remaining_qty_until_maturity",
-            "recommended_order_qty_now",
+            "sku", "year_week", "total_sale_qty", "total_base_stock_qty", "total_ipgo_qty",
+            "total_loss", "cumulative_loss", "total_center_stock"
         ])
 
-    work = forecast_df.copy()
-    for col in ["sku", "style_code", "stage", "plant"]:
-        if col in work.columns:
-            work[col] = work[col].astype(str).str.strip()
+    ws = weekly_stock_df.copy()
+    ws = ws.sort_values(["sku", "year_week", "created_at"], ascending=[True, False, False])
+    latest = ws.drop_duplicates(subset=["sku"], keep="first").copy()
+    return latest
 
-    if "sale_qty" in work.columns:
-        work["sale_qty"] = pd.to_numeric(work["sale_qty"], errors="coerce").fillna(0)
+
+def build_sku_master(forecast_df: pd.DataFrame, weekly_stock_df: pd.DataFrame) -> pd.DataFrame:
+    if forecast_df.empty and weekly_stock_df.empty:
+        return pd.DataFrame()
+
+    base = forecast_df.copy()
+    if not base.empty:
+        base = base.sort_values(["sku", "created_at"], ascending=[True, False])
+        sku_info = (
+            base.groupby("sku", dropna=False)
+            .agg(
+                style_code=("style_code", "first"),
+                stage=("stage", "first"),
+                sale_end_date=("sale_end_date", "max"),
+                latest_created_at=("created_at", "max"),
+            )
+            .reset_index()
+        )
     else:
-        work["sale_qty"] = 0
+        sku_info = pd.DataFrame(columns=["sku", "style_code", "stage", "sale_end_date", "latest_created_at"])
 
-    if "week_no" in work.columns:
-        work["week_no_num"] = pd.to_numeric(work["week_no"], errors="coerce")
-    else:
-        work["week_no_num"] = pd.NA
+    latest_stock = get_latest_sku_snapshot(weekly_stock_df)
 
-    current_week = _current_iso_week()
+    # 현재 이후 예측 기준 집계
+    if not forecast_df.empty:
+        current_week = datetime.today().isocalendar().week
+        fw = forecast_df.copy()
+        fw["week_no"] = pd.to_numeric(fw["week_no"], errors="coerce")
+        future = fw[fw["week_no"].fillna(0) >= current_week].copy()
 
-    step2_by_sku = dashboard_df.copy()
-    if not step2_by_sku.empty:
-        for col in ["lead_time", "shortage_qty"]:
-            if col in step2_by_sku.columns:
-                step2_by_sku[col] = pd.to_numeric(step2_by_sku[col], errors="coerce")
-        step2_by_sku = step2_by_sku.sort_values("created_at", ascending=False, na_position="last")
-        step2_by_sku = step2_by_sku.drop_duplicates(subset=["sku"], keep="first")
-    else:
-        step2_by_sku = pd.DataFrame(columns=["sku", "lead_time", "shortage_qty"])
-
-    result_rows = []
-
-    for sku, g in work.groupby("sku", dropna=False):
-        sku = str(sku).strip()
-        if not sku:
-            continue
-
-        g = g.copy()
-        g = g[g["week_no_num"].notna()]
-        if g.empty:
-            season_remaining_qty_until_maturity = 0.0
-            recommended_order_qty_now = 0.0
-        else:
-            g["week_no_num"] = g["week_no_num"].astype(int)
-            g = g.sort_values(["week_no_num", "stage"], na_position="last")
-            g_future = g[g["week_no_num"] >= current_week].copy()
-
-            # 성숙기까지 남은 판매량
-            # 현재 주차부터 시작해서 stage가 '쇠퇴기'로 바뀌기 전까지의 sale_qty 합
-            season_remaining_qty_until_maturity = 0.0
-            if not g_future.empty:
-                weekly_stage = (
-                    g_future.groupby("week_no_num", as_index=False)
-                    .agg(
-                        sale_qty=("sale_qty", "sum"),
-                        stage=("stage", lambda x: str(next((v for v in x if str(v).strip()), "")).strip()),
-                    )
-                    .sort_values("week_no_num")
-                )
-
-                for _, row in weekly_stage.iterrows():
-                    stage = str(row.get("stage") or "").strip()
-                    if stage == "쇠퇴기":
-                        break
-                    season_remaining_qty_until_maturity += _to_float(row.get("sale_qty"))
-
-            # 당장 발주량
-            # 정의: 전체 매장이 lead time + 4주를 버틸 만큼 필요한 발주량
-            # step2의 shortage_qty를 우선 사용하고, 없으면 forecast로 근사 계산
-            step2_row = step2_by_sku[step2_by_sku["sku"].astype(str) == sku]
-            recommended_order_qty_now = 0.0
-
-            if not step2_row.empty:
-                r = step2_row.iloc[0]
-                shortage_qty = _to_float(r.get("shortage_qty"))
-                recommended_order_qty_now = max(shortage_qty, 0.0)
-
-                if recommended_order_qty_now <= 0:
-                    lead_time_days = _to_float(r.get("lead_time"))
-                    lead_time_weeks = max(0, int((lead_time_days + 6) // 7))
-                    target_weeks = lead_time_weeks + 4
-
-                    if not g_future.empty:
-                        weekly_sales = (
-                            g_future.groupby("week_no_num", as_index=False)["sale_qty"]
-                            .sum()
-                            .sort_values("week_no_num")
-                        )
-                        recommended_order_qty_now = float(weekly_sales.head(max(target_weeks, 1))["sale_qty"].sum())
-            else:
-                weekly_sales = (
-                    g_future.groupby("week_no_num", as_index=False)["sale_qty"]
-                    .sum()
-                    .sort_values("week_no_num")
-                ) if not g_future.empty else pd.DataFrame(columns=["week_no_num", "sale_qty"])
-                recommended_order_qty_now = float(weekly_sales.head(4)["sale_qty"].sum()) if not weekly_sales.empty else 0.0
-
-        result_rows.append(
-            {
-                "sku": sku,
-                "season_remaining_qty_until_maturity": int(round(max(season_remaining_qty_until_maturity, 0.0))),
-                "recommended_order_qty_now": int(round(max(recommended_order_qty_now, 0.0))),
-            }
+        future_summary = (
+            future.groupby("sku", dropna=False)
+            .agg(
+                future_sale_qty=("sale_qty", "sum"),
+                plant_count=("plant", lambda x: x.astype(str).replace("", pd.NA).dropna().nunique()),
+                max_week_no=("week_no", "max"),
+            )
+            .reset_index()
         )
 
-    return pd.DataFrame(result_rows)
-
-
-
-def prepare_dataframe(df: pd.DataFrame, forecast_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    date_cols = ["created_at", "order_due_date", "sale_start_date"]
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    numeric_cols = [
-        "shortage_store_count",
-        "lead_time",
-        "center_stock_qty",
-        "surplus_qty",
-        "shortage_qty",
-        "total_reorder_amount",
-        "due_date_reorder_amount",
-        "total_sale_qty",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["days_left"] = df["order_due_date"].apply(compute_days_left)
-    df["action_category"] = df.apply(classify_row, axis=1)
-    df["priority_score"] = df.apply(priority_score, axis=1)
-
-    def badge_text(category: str) -> str:
-        mapping = {
-            "발주시점 지남": "⏱ 발주시점 지남",
-            "즉시 발주": "🔴 즉시 발주",
-            "곧 발주": "🟠 곧 발주",
-            "발주 검토": "🟡 발주 검토",
-            "발주 불필요": "🟢 발주 불필요",
-            "장기 불필요": "⚪ 장기 불필요",
-        }
-        return mapping.get(category, category)
-
-    df["status_badge"] = df["action_category"].apply(badge_text)
-
-    if forecast_df is not None and not forecast_df.empty:
-        sku_metrics = compute_sku_metrics_from_forecast(forecast_df, df)
-        if not sku_metrics.empty:
-            df = df.merge(sku_metrics, on="sku", how="left")
-        else:
-            df["season_remaining_qty_until_maturity"] = None
-            df["recommended_order_qty_now"] = None
+        plant_now = (
+            fw.groupby(["sku", "plant"], dropna=False)
+            .agg(
+                plant_sale_qty=("sale_qty", "sum"),
+                plant_base_stock_qty=("BASE_STOCK_QTY", "max"),
+                plant_ipgo_qty=("IPGO_QTY", "sum"),
+                plant_loss_qty=("loss", "max"),
+                plant_peak_count=("is_peak_week", "sum"),
+                latest_stage=("stage", "last"),
+            )
+            .reset_index()
+        )
     else:
-        df["season_remaining_qty_until_maturity"] = None
-        df["recommended_order_qty_now"] = None
+        future_summary = pd.DataFrame(columns=["sku", "future_sale_qty", "plant_count", "max_week_no"])
+        plant_now = pd.DataFrame(columns=[
+            "sku", "plant", "plant_sale_qty", "plant_base_stock_qty", "plant_ipgo_qty", "plant_loss_qty",
+            "plant_peak_count", "latest_stage"
+        ])
 
-    return df
+    sku_df = sku_info.merge(latest_stock, on="sku", how="outer")
+    sku_df = sku_df.merge(future_summary, on="sku", how="left")
 
+    for col in [
+        "total_sale_qty", "total_base_stock_qty", "total_ipgo_qty", "total_loss",
+        "cumulative_loss", "total_center_stock", "future_sale_qty", "plant_count"
+    ]:
+        if col in sku_df.columns:
+            sku_df[col] = pd.to_numeric(sku_df[col], errors="coerce").fillna(0)
 
-def build_style_summary(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "style_code",
-                "sku_count",
-                "style_total_sale_qty",
-                "style_season_remaining_qty",
-                "style_recommended_order_qty",
-                "style_shortage_qty",
-                "style_center_stock_qty",
-                "style_reorder_needed_count",
-                "latest_order_due_date",
-            ]
-        )
-
-    work = df.copy()
-    work["reorder_needed_bool"] = work["reorder_needed"].apply(normalize_boolean)
-
-    grouped = (
-        work.groupby("style_code", dropna=False)
-        .agg(
-            sku_count=("sku", lambda x: x.astype(str).nunique()),
-            style_total_sale_qty=("total_sale_qty", "sum"),
-            style_season_remaining_qty=("season_remaining_qty_until_maturity", "sum"),
-            style_recommended_order_qty=("recommended_order_qty_now", "sum"),
-            style_shortage_qty=("shortage_qty", "sum"),
-            style_center_stock_qty=("center_stock_qty", "sum"),
-            style_reorder_needed_count=("reorder_needed_bool", "sum"),
-            latest_order_due_date=("order_due_date", "min"),
-        )
-        .reset_index()
+    sku_df["plant_count"] = sku_df["plant_count"].fillna(0).astype(int)
+    sku_df["display_year"] = sku_df["year_week"].astype(str).str[:4]
+    sku_df["risk_score"] = (
+        sku_df["cumulative_loss"] * 3
+        + sku_df["total_loss"] * 2
+        + (sku_df["future_sale_qty"] - sku_df["total_base_stock_qty"] - sku_df["total_center_stock"]).clip(lower=0)
     )
 
-    grouped["latest_order_due_date"] = pd.to_datetime(
-        grouped["latest_order_due_date"], errors="coerce"
-    )
+    # 화면용 KPI
+    sku_df["need_reorder_qty"] = (
+        sku_df["future_sale_qty"] - sku_df["total_base_stock_qty"] - sku_df["total_center_stock"]
+    ).clip(lower=0)
+    sku_df["sell_through"] = (
+        sku_df["total_sale_qty"] /
+        (sku_df["total_sale_qty"] + sku_df["total_base_stock_qty"] + 1e-9)
+    ).fillna(0)
+    sku_df["inventory_coverage"] = (
+        (sku_df["total_base_stock_qty"] + sku_df["total_center_stock"]) /
+        (sku_df["future_sale_qty"] + 1e-9)
+    ).fillna(0)
 
-    grouped["style_priority"] = (
-        grouped["style_recommended_order_qty"].fillna(0)
-        + grouped["style_shortage_qty"].fillna(0)
-        + grouped["style_reorder_needed_count"].fillna(0) * 1000
-    )
+    def classify_status(row: pd.Series) -> str:
+        if row["need_reorder_qty"] > 0 and row["cumulative_loss"] > 0:
+            return "리오더 필요"
+        if row["need_reorder_qty"] > 0:
+            return "리오더 검토"
+        if row["cumulative_loss"] > 0:
+            return "관리 필요"
+        return "안정"
 
-    grouped = grouped.sort_values(
-        by=["style_priority", "latest_order_due_date", "style_code"],
-        ascending=[False, True, True],
+    sku_df["status"] = sku_df.apply(classify_status, axis=1)
+
+    # 메인 테이블 정렬
+    sku_df = sku_df.sort_values(
+        ["risk_score", "need_reorder_qty", "future_sale_qty", "sku"],
+        ascending=[False, False, False, True],
         na_position="last",
-    )
+    ).reset_index(drop=True)
 
-    return grouped
+    return sku_df, plant_now
 
 
 # -------------------------------------------------
-# 사이드바 필터
+# 필터
 # -------------------------------------------------
-def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-    st.sidebar.header("조회 조건")
+def apply_filters(sku_df: pd.DataFrame) -> pd.DataFrame:
+    st.markdown('<div class="section-title">상세 내역</div>', unsafe_allow_html=True)
 
-    st.sidebar.write("### 검색")
-    style_keyword = st.sidebar.text_input("스타일코드 검색")
-    sku_keyword = st.sidebar.text_input("SKU 검색")
+    c1, c2, c3, c4, c5 = st.columns([0.9, 0.9, 0.9, 2.0, 0.7])
 
-    st.sidebar.write("### 상태 필터")
-    category_options = ["발주시점 지남", "즉시 발주", "곧 발주", "발주 검토", "발주 불필요", "장기 불필요"]
-    selected_categories = st.sidebar.multiselect(
-        "발주 상태",
-        options=category_options,
-        default=category_options,
-    )
+    year_options = sorted([x for x in sku_df["display_year"].dropna().astype(str).unique().tolist() if x])
+    year_selected = c1.selectbox("연도", options=["전체"] + year_options, index=0)
 
-    urgency_options = sorted([x for x in df["reorder_urgency"].dropna().astype(str).unique().tolist() if x.strip()])
-    selected_urgencies = st.sidebar.multiselect(
-        "reorder_urgency",
-        options=urgency_options,
-        default=urgency_options,
-    )
+    stage_options = sorted([x for x in sku_df["stage"].dropna().astype(str).unique().tolist() if x])
+    stage_selected = c2.selectbox("스테이지", options=["전체"] + stage_options, index=0)
 
-    st.sidebar.write("### 수치 조건")
-    only_reorder_needed = st.sidebar.checkbox("reorder_needed = true만 보기", value=False)
-    only_overdue = st.sidebar.checkbox("발주기한 지난 것만 보기", value=False)
-    only_shortage = st.sidebar.checkbox("부족수량 있는 것만 보기", value=False)
+    status_options = ["전체", "리오더 필요", "리오더 검토", "관리 필요", "안정"]
+    status_selected = c3.selectbox("상태", options=status_options, index=0)
 
-    min_shortage_store_count = st.sidebar.number_input(
-        "최소 부족 매장 수",
-        min_value=0,
-        value=0,
-        step=1,
-    )
+    keyword = c4.text_input("검색", placeholder="아이템 또는 스타일코드 검색")
+    _ = c5.button("조회", use_container_width=True)
 
-    filtered = df.copy()
+    filtered = sku_df.copy()
 
-    if style_keyword:
+    if year_selected != "전체":
+        filtered = filtered[filtered["display_year"] == year_selected]
+
+    if stage_selected != "전체":
+        filtered = filtered[filtered["stage"].astype(str) == stage_selected]
+
+    if status_selected != "전체":
+        filtered = filtered[filtered["status"] == status_selected]
+
+    if keyword:
+        keyword = keyword.strip()
         filtered = filtered[
-            filtered["style_code"].astype(str).str.contains(style_keyword, case=False, na=False)
+            filtered["sku"].astype(str).str.contains(keyword, case=False, na=False)
+            | filtered["style_code"].astype(str).str.contains(keyword, case=False, na=False)
         ]
 
-    if sku_keyword:
-        filtered = filtered[
-            filtered["sku"].astype(str).str.contains(sku_keyword, case=False, na=False)
-        ]
-
-    if selected_categories:
-        filtered = filtered[filtered["action_category"].isin(selected_categories)]
-
-    if selected_urgencies:
-        filtered = filtered[
-            filtered["reorder_urgency"].astype(str).isin(selected_urgencies)
-            | filtered["reorder_urgency"].isna()
-        ]
-
-    if only_reorder_needed:
-        filtered = filtered[filtered["reorder_needed"].apply(normalize_boolean)]
-
-    if only_overdue:
-        filtered = filtered[filtered["days_left"].notna() & (filtered["days_left"] < 1)]
-
-    if only_shortage:
-        filtered = filtered[
-            filtered["shortage_qty"].fillna(0) > 0
-        ]
-
-    filtered = filtered[
-        filtered["shortage_store_count"].fillna(0) >= min_shortage_store_count
-    ]
-
-    filtered = filtered.sort_values(
-        by=["priority_score", "days_left", "shortage_qty"],
-        ascending=[False, True, False],
-        na_position="last",
-    )
-
-    return filtered
+    return filtered.reset_index(drop=True)
 
 
 # -------------------------------------------------
-# KPI
+# 상단 영역
 # -------------------------------------------------
-def render_kpis(df: pd.DataFrame):
-    past_order_point_count = (df["action_category"] == "발주시점 지남").sum()
-    immediate_count = (df["action_category"] == "즉시 발주").sum()
-    soon_count = (df["action_category"] == "곧 발주").sum()
-    reorder_count = df["reorder_needed"].apply(normalize_boolean).sum()
+def render_top_summary(df: pd.DataFrame) -> None:
+    reorder_style_cnt = df.loc[df["need_reorder_qty"] > 0, "style_code"].astype(str).nunique()
+    reorder_qty = int(round(df["need_reorder_qty"].sum()))
+    reorder_sku_cnt = int((df["need_reorder_qty"] > 0).sum())
+    avg_sell_through = float(df["sell_through"].mean() * 100) if not df.empty else 0.0
+    portfolio_ratio = float((df["status"] != "안정").mean() * 100) if not df.empty else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("발주시점 지남", int(past_order_point_count))
-    c2.metric("즉시 발주", int(immediate_count))
-    c3.metric("곧 발주", int(soon_count))
-    c4.metric("발주 필요", int(reorder_count))
+    st.markdown('<div class="top-wrap">', unsafe_allow_html=True)
+    m1, m2, m3, m4, m5, m6 = st.columns([1.0, 1.0, 1.0, 1.0, 1.7, 0.7])
+
+    with m1:
+        st.markdown(
+            f'''<div class="metric-card"><div class="metric-label">리오더 스타일 수</div><div class="metric-value">{reorder_style_cnt}</div></div>''',
+            unsafe_allow_html=True,
+        )
+    with m2:
+        st.markdown(
+            f'''<div class="metric-card"><div class="metric-label">리오더 발주액</div><div class="metric-value">0<span class="metric-unit">원</span></div></div>''',
+            unsafe_allow_html=True,
+        )
+    with m3:
+        st.markdown(
+            f'''<div class="metric-card"><div class="metric-label">리오더 발주량</div><div class="metric-value">{reorder_qty:,}<span class="metric-unit">pcs</span></div></div>''',
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.markdown(
+            f'''<div class="metric-card"><div class="metric-label">리오더 위험률</div><div class="metric-value">{avg_sell_through:,.1f}<span class="metric-unit">%</span></div></div>''',
+            unsafe_allow_html=True,
+        )
+    with m5:
+        st.markdown(
+            f'''
+            <div class="bar-card">
+                <div class="metric-label">생산지 포트폴리오</div>
+                <div style="color:#dff6ff;font-size:14px;font-weight:700;">{portfolio_ratio:,.1f}%</div>
+                <div class="bar-track"><div class="bar-fill" style="width:{min(max(portfolio_ratio, 0), 100)}%;"></div></div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+    with m6:
+        planner_options = ["전체"]
+        st.selectbox("기획자", planner_options, index=0)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="top-tabs"><div class="top-tab-active">상세 내역</div><div class="top-tab">리오더 확정</div></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------
-# 스타일 요약
+# 메인 SKU 테이블
 # -------------------------------------------------
-def render_style_table(style_df: pd.DataFrame) -> Optional[str]:
-    st.subheader("스타일별 요약")
+def format_main_table(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["주판매율"] = (out["sell_through"] * 100).round(1).astype(str) + "%"
+    out["달성율"] = ((out["inventory_coverage"] * 100).clip(upper=999)).round(1).astype(str) + "%"
+    out["리오더수량"] = out["need_reorder_qty"].round(0).astype(int)
+    out["주판매량"] = out["future_sale_qty"].round(0).astype(int)
+    out["실적"] = out["total_sale_qty"].round(0).astype(int)
+    out["원가율"] = out["cumulative_loss"].round(1)
+    out["보정판매기간"] = out["stage"].replace({"": "-"})
+    out["연도"] = out["display_year"].replace({"": "-"})
+    out["시즌"] = "-"
+    out["복종"] = "-"
+    out["아이템"] = "-"
+    out["기획자"] = "-"
+    out["스타일코드"] = out["style_code"].replace({"": "-"})
+    out["SKU"] = out["sku"].replace({"": "-"})
+    out["상태"] = out["status"]
+    out["센터재고"] = out["total_center_stock"].round(0).astype(int)
+    out["가용재고"] = out["total_base_stock_qty"].round(0).astype(int)
+    out["피크주수"] = out["plant_count"].astype(int)
 
-    if style_df.empty:
-        st.info("표시할 스타일 요약 데이터가 없습니다.")
+    return out[[
+        "연도", "시즌", "복종", "아이템", "기획자", "스타일코드", "SKU",
+        "실적", "달성율", "주판매율", "주판매량", "원가율", "보정판매기간",
+        "가용재고", "센터재고", "리오더수량", "피크주수", "상태"
+    ]]
+
+
+# -------------------------------------------------
+# 사이드 상세 패널
+# -------------------------------------------------
+def get_selected_sku_from_table(filtered_df: pd.DataFrame) -> Optional[str]:
+    options = filtered_df["sku"].astype(str).tolist()
+    if not options:
         return None
 
-    view_df = style_df.copy()
-    view_df["latest_order_due_date"] = view_df["latest_order_due_date"].dt.strftime("%Y-%m-%d")
-
-    display_df = view_df.rename(
-        columns={
-            "style_code": "스타일코드",
-            "sku_count": "SKU 수",
-            "style_total_sale_qty": "기판매량",
-            "style_season_remaining_qty": "성숙기까지 예상판매수량 합계",
-            "style_recommended_order_qty": "1차리오더 권장량",
-            "style_center_stock_qty": "현 센터재고량",
-            "style_reorder_needed_count": "발주 필요 SKU 수",
-            "latest_order_due_date": "가장 이른 발주기한",
-        }
-    )
-
-    st.dataframe(
-        display_df[
-            [
-                "스타일코드",
-                "SKU 수",
-                "발주 필요 SKU 수",
-                "기판매량",
-                "성숙기까지 예상판매수량 합계",
-                "1차리오더 권장량",
-                "현 센터재고량",
-                "가장 이른 발주기한",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    style_options = view_df["style_code"].dropna().astype(str).tolist()
-    selected_style = st.selectbox(
-        "상세 확인할 스타일 선택",
-        options=style_options,
-    )
-    return selected_style
+    st.markdown('<div class="select-hint">SKU를 하나 선택하면 오른쪽에서 매장별 상세를 볼 수 있습니다.</div>', unsafe_allow_html=True)
+    selected = st.selectbox("선택 SKU", options=options, label_visibility="collapsed")
+    return selected
 
 
-# -------------------------------------------------
-# 메인 화면
-# -------------------------------------------------
-def render_main_table(df: pd.DataFrame):
-    view_df = df.copy()
+def render_side_detail(selected_sku: Optional[str], sku_df: pd.DataFrame, plant_df: pd.DataFrame) -> None:
+    st.markdown('<div class="sidebox">', unsafe_allow_html=True)
+    st.markdown("### SKU 상세")
 
-    view_df["order_due_date"] = view_df["order_due_date"].dt.strftime("%Y-%m-%d")
-    view_df["created_at"] = view_df["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    if "sale_start_date" in view_df.columns:
-        view_df["sale_start_date"] = view_df["sale_start_date"].dt.strftime("%Y-%m-%d")
-
-    display_columns = {
-        "status_badge": "발주상태",
-        "style_code": "스타일코드",
-        "sku": "SKU",
-        "sale_start_date": "판매시작일",
-        "total_sale_qty": "판매량",
-        "monthly_code": "월물",
-        "season_remaining_qty_until_maturity": "성숙기까지 예상판매수량",
-        "recommended_order_qty_now": "권장 발주량(지금)",
-        "reorder_urgency": "회전/리오더",
-        "order_due_date": "발주기한",
-        "surplus_qty": "여유수량",
-        "center_stock_qty": "센터재고",
-        "lead_time": "리드타임",
-        "shortage_start_week": "부족시작주차",
-        "created_at": "생성시각",
-    }
-
-    view_df = view_df[list(display_columns.keys())].rename(columns=display_columns)
-
-    st.dataframe(
-        view_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-
-def render_download(df: pd.DataFrame):
-    csv = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        label="CSV 다운로드",
-        data=csv,
-        file_name="store_inventory_status_step2_dashboard.csv",
-        mime="text/csv",
-    )
-
-
-
-def render_detail_panel(df: pd.DataFrame):
-    st.subheader("SKU 상세 보기")
-
-    sku_list = df["sku"].dropna().astype(str).unique().tolist()
-    if not sku_list:
-        st.info("현재 조건에 맞는 SKU가 없습니다.")
+    if not selected_sku:
+        st.info("왼쪽 표에서 SKU를 선택하세요.")
+        st.markdown('</div>', unsafe_allow_html=True)
         return
 
-    selected_sku = st.selectbox("상세 확인할 SKU 선택", sku_list)
-    detail = df[df["sku"].astype(str) == selected_sku].iloc[0]
+    sku_row = sku_df[sku_df["sku"].astype(str) == str(selected_sku)]
+    if sku_row.empty:
+        st.info("선택한 SKU 정보를 찾지 못했습니다.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("발주상태", detail["action_category"])
-    col2.metric("발주기한", str(detail["order_due_date"].date()) if pd.notna(detail["order_due_date"]) else "없음")
-    col3.metric("D-day", int(detail["days_left"]) if pd.notna(detail["days_left"]) else "없음")
+    r = sku_row.iloc[0]
 
-    st.write("### 상세 정보")
-    detail_table = pd.DataFrame(
-        {
-            "항목": [
-                "style_code",
-                "sku",
-                "sale_start_date",
-                "total_sale_qty",
-                "monthly_code",
-                "season_remaining_qty_until_maturity",
-                "recommended_order_qty_now",
-                "shortage_qty",
-                "surplus_qty",
-                "center_stock_qty",
-                "shortage_store_count",
-                "lead_time",
-                "total_reorder_amount",
-                "due_date_reorder_amount",
-                "reorder_needed",
-                "reorder_urgency",
-                "order_due_date",
-                "shortage_start_week",
-                "created_at",
-            ],
-            "값": [
-                detail.get("style_code"),
-                detail.get("sku"),
-                detail.get("sale_start_date"),
-                detail.get("total_sale_qty"),
-                detail.get("monthly_code"),
-                detail.get("season_remaining_qty_until_maturity"),
-                detail.get("recommended_order_qty_now"),
-                detail.get("shortage_qty"),
-                detail.get("surplus_qty"),
-                detail.get("center_stock_qty"),
-                detail.get("shortage_store_count"),
-                detail.get("lead_time"),
-                detail.get("total_reorder_amount"),
-                detail.get("due_date_reorder_amount"),
-                detail.get("reorder_needed"),
-                detail.get("reorder_urgency"),
-                detail.get("order_due_date"),
-                detail.get("shortage_start_week"),
-                detail.get("created_at"),
-            ],
-        }
+    chip_class = "danger-chip" if r["need_reorder_qty"] > 0 else "chip"
+    st.markdown(
+        f'<span class="chip">{r.get("style_code", "-")}</span><span class="chip {chip_class}">{r.get("status", "-")}</span>',
+        unsafe_allow_html=True,
     )
-    st.dataframe(detail_table, use_container_width=True, hide_index=True)
+
+    d1, d2 = st.columns(2)
+    d1.metric("SKU", str(r.get("sku") or "-"))
+    d2.metric("스테이지", str(r.get("stage") or "-"))
+
+    d3, d4 = st.columns(2)
+    d3.metric("총 판매", int(round(float(r.get("total_sale_qty") or 0))))
+    d4.metric("리오더 필요", int(round(float(r.get("need_reorder_qty") or 0))))
+
+    d5, d6 = st.columns(2)
+    d5.metric("매장재고 합", int(round(float(r.get("total_base_stock_qty") or 0))))
+    d6.metric("센터재고", int(round(float(r.get("total_center_stock") or 0))))
+
+    st.markdown("#### 매장별 세부 내용")
+    detail = plant_df[plant_df["sku"].astype(str) == str(selected_sku)].copy()
+    if detail.empty:
+        st.info("매장별 상세 데이터가 없습니다.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    detail["매장"] = detail["plant"].replace({"": "-"})
+    detail["판매량"] = safe_num(detail["plant_sale_qty"]).round(0).astype(int)
+    detail["재고"] = safe_num(detail["plant_base_stock_qty"]).round(0).astype(int)
+    detail["입고"] = safe_num(detail["plant_ipgo_qty"]).round(0).astype(int)
+    detail["loss"] = safe_num(detail["plant_loss_qty"]).round(0).astype(int)
+    detail["피크주"] = safe_num(detail["plant_peak_count"]).round(0).astype(int)
+    detail["stage"] = detail["latest_stage"].replace({"": "-"})
+
+    detail = detail[["매장", "판매량", "재고", "입고", "loss", "피크주", "stage"]].sort_values(
+        ["loss", "판매량", "재고", "매장"],
+        ascending=[False, False, True, True],
+    )
+
+    st.dataframe(detail, use_container_width=True, hide_index=True, height=520)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------
 # 실행
 # -------------------------------------------------
-def main():
+def main() -> None:
+    st.markdown('<div class="section-title">SKU 리오더 대시보드</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">메인 목록은 SKU 단위, 오른쪽 패널은 클릭한 SKU의 매장별 세부 정보입니다.</div>', unsafe_allow_html=True)
+
     try:
-        raw_df = load_data()
-        forecast_df = load_forecast_data()
+        forecast_df = load_weekly_forecast()
+        weekly_stock_df = load_weekly_stock()
     except Exception as e:
         st.error(f"데이터를 불러오지 못했습니다: {e}")
         st.stop()
 
-    if raw_df.empty:
-        st.warning("store_inventory_status_step2 테이블에 데이터가 없습니다.")
+    if forecast_df.empty and weekly_stock_df.empty:
+        st.warning("sku_weekly_forecast_2, weekly_stock 테이블에 데이터가 없습니다.")
         st.stop()
 
-    df = prepare_dataframe(raw_df, forecast_df)
-    filtered_df = apply_filters(df)
+    sku_df, plant_df = build_sku_master(forecast_df, weekly_stock_df)
+    if sku_df.empty:
+        st.warning("SKU 기준으로 묶을 데이터가 없습니다.")
+        st.stop()
 
-    render_kpis(filtered_df)
-    st.divider()
+    render_top_summary(sku_df)
+    filtered_df = apply_filters(sku_df)
 
-    style_summary_df = build_style_summary(filtered_df)
-    selected_style = render_style_table(style_summary_df)
-    st.divider()
+    left, right = st.columns([3.8, 1.5], gap="large")
 
-    if selected_style:
-        style_filtered_df = filtered_df[
-            filtered_df["style_code"].astype(str) == str(selected_style)
-        ].copy()
-    else:
-        style_filtered_df = filtered_df.copy()
+    with left:
+        st.caption(f"{len(filtered_df):,}건")
+        view_df = format_main_table(filtered_df)
+        st.dataframe(view_df, use_container_width=True, hide_index=True, height=760)
+        selected_sku = get_selected_sku_from_table(filtered_df)
 
-    st.subheader("SKU 상세 목록")
-
-    tab1, tab2 = st.tabs(["SKU 목록", "SKU 상세 보기"])
-
-    with tab1:
-        render_main_table(style_filtered_df)
-        render_download(style_filtered_df)
-
-    with tab2:
-        render_detail_panel(style_filtered_df)
-
-    with st.expander("판정 기준 설명"):
-        st.markdown(
-            """
-            - **성숙기까지 예상판매수량**
-              - `sku_weekly_forecast_2`에서 현재 주차부터 시작
-              - `stage = 쇠퇴기`가 나오기 전까지의 주차별 `sale_qty` 합
-              - 즉, 성숙기 종료 전까지 더 팔릴 것으로 예상되는 수량
-
-            - **권장 발주량(지금)**
-              - 우선 `store_inventory_status_step2.shortage_qty`를 사용
-              - 이 값은 실무적으로 전체 매장이 `lead time + 4주`를 버티도록 채워야 하는 부족분으로 보는 것이 가장 적절함
-              - 값이 비어 있거나 0이면, 보조 계산으로 `sku_weekly_forecast_2`의 향후 `lead time + 4주` 판매예측 합을 사용
-
-            - **발주시점 지남**
-              - `order_due_date`가 내일(오늘+1일) 미만인 경우 (날짜 기준 당일 포함)
-
-            - **즉시 발주**
-              - `reorder_needed = true` 이고
-              - `reorder_urgency = 긴급` 이거나
-              - `order_due_date`가 이미 지났거나 3일 이내인 경우
-
-            - **곧 발주**
-              - `reorder_needed = true` 이고
-              - 발주기한이 4~14일 남았거나 `reorder_urgency`가 주의/보통인 경우
-
-            - **발주 검토**
-              - 발주는 필요하지만 즉시/곧 발주까지는 아닌 경우
-
-            - **발주 불필요**
-              - 현재 기준으로 발주 필요가 없는 경우
-
-            - **장기 불필요**
-              - 부족수량(`shortage_qty`)이 없고, 발주기한도 없는 경우
-              - 실무적으로는 '당분간 발주 필요 없음' 의미로 해석하는 것이 안전합니다.
-            """
-        )
+    with right:
+        render_side_detail(selected_sku, sku_df, plant_df)
 
 
 if __name__ == "__main__":
