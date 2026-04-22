@@ -195,27 +195,59 @@ st.divider()
 # =========================
 # SKU별 요약
 # =========================
-st.subheader("SKU별 요약")
+st.subheader("상세 내역")
 sku_summary = (
     filtered_df.groupby(["style_code", "sku"], as_index=False)
     .agg(
-        plant_cnt=("plant", "nunique"),
         base_stock=("base_stock", "sum"),
-        recent_sales=("avg_sale_prev_2w", "sum"),
-        reorder_qty=("sum_reorder_5w", "sum"),
-        lackplant_cnt=("sum_lackplant_5w", "sum"),
+        total_sales=("avg_sale_prev_2w", "sum"),
+        total_reorder=("total_reorder", "sum"),
+
+        w0_loss=("w0_reorder", "sum"),
+        w0_lackplant=("w0_lackplant", "sum"),
+
+        w1_loss=("w1_reorder", "sum"),
+        w1_lackplant=("w1_lackplant", "sum"),
+
+        w2_loss=("w2_reorder", "sum"),
+        w2_lackplant=("w2_lackplant", "sum"),
+
+        w3_loss=("w3_reorder", "sum"),
+        w3_lackplant=("w3_lackplant", "sum"),
+
+        w4_loss=("w4_reorder", "sum"),
+        w4_lackplant=("w4_lackplant", "sum"),
     )
-    .sort_values(["reorder_qty", "recent_sales"], ascending=[False, False])
+    .sort_values(["total_reorder", "total_sales"], ascending=[False, False])
 )
 
+sku_summary = sku_summary.rename(columns={
+    "base_stock": "총 매장재고",
+    "total_sales": "총 판매량",
+    "total_reorder": "총 리오더 수량",
+
+    "w0_loss": "W+0 LOSS",
+    "w0_lackplant": "W+0 부족매장수",
+
+    "w1_loss": "W+1 LOSS",
+    "w1_lackplant": "W+1 부족매장수",
+
+    "w2_loss": "W+2 LOSS",
+    "w2_lackplant": "W+2 부족매장수",
+
+    "w3_loss": "W+3 LOSS",
+    "w3_lackplant": "W+3 부족매장수",
+
+    "w4_loss": "W+4 LOSS",
+    "w4_lackplant": "W+4 부족매장수",
+})
+
 st.dataframe(sku_summary, use_container_width=True, height=350)
-
-
 
 # =========================
 # 상세 테이블
 # =========================
-st.subheader("상세 내역")
+st.subheader("매장별 상세 내역")
 
 detail_df = filtered_df[
     [  "style_code",
