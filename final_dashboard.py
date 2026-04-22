@@ -245,7 +245,7 @@ detail_df = detail_df.rename(columns={
     
 })
 
-detail_df = detail_df.sort_values(["w+1 부족수량",  "w+2 부족수량",  "엔딩까지 총 리오더수량" ], ascending=[False, False, False])
+detail_df = detail_df.sort_values(["w+1 부족수량",  "w+2 부족수량",  "총 리오더수량" ], ascending=[False, False, False])
 
 st.dataframe(detail_df, use_container_width=True, height=500)
 
