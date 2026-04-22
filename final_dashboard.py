@@ -169,69 +169,26 @@ if filtered_df.empty:
 # =========================
 # KPI 영역
 # =========================
-total_rows = len(filtered_df)
 total_style = filtered_df["style_code"].nunique()
 total_sku = filtered_df["sku"].nunique()
-total_sales_2w = filtered_df["w1_sale_prev"].sum() + filtered_df["w2_sale_prev"].sum()
-total_avg_sales = filtered_df["avg_sale_prev_2w"].sum()
-total_reorder = filtered_df["sum_reorder_5w"].sum()
-total_base_stock = filtered_df["base_stock"].sum()
+
+# 금주(w0) 리오더 필요 스타일 / SKU 수
+w0_reorder_df = filtered_df[filtered_df["w0_reorder"] > 0]
+w0_reorder_style_cnt = w0_reorder_df["style_code"].nunique()
+w0_reorder_sku_cnt = w0_reorder_df["sku"].nunique()
+
+# 차주(w1) 리오더 필요 스타일 / SKU 수
+w1_reorder_df = filtered_df[filtered_df["w1_reorder"] > 0]
+w1_reorder_style_cnt = w1_reorder_df["style_code"].nunique()
+w1_reorder_sku_cnt = w1_reorder_df["sku"].nunique()
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("행 수", f"{total_rows:,}")
-c2.metric("스타일 수", f"{total_style:,}")
-c3.metric("SKU 수", f"{total_sku:,}")
-c4.metric("최근 2주 판매량 합", f"{total_sales_2w:,.0f}")
-c5.metric("평균 판매량", f"{total_avg_sales:,.1f}")
-c6.metric("총 리오더 필요 수량", f"{total_reorder:,.0f}")
-
-st.divider()
-
-
-# =========================
-# 판매량 / 리오더 요약
-# =========================
-left, right = st.columns(2)
-
-with left:
-    st.subheader("스타일별 판매량 / 리오더")
-    style_summary = (
-        filtered_df.groupby("style_code", as_index=False)
-        .agg(
-            recent_sales=("avg_sale_prev_2w", "sum"),
-            reorder_qty=("sum_reorder_5w", "sum"),
-            base_stock=("base_stock", "sum"),
-        )
-        .sort_values(["reorder_qty", "recent_sales"], ascending=[False, False])
-    )
-
-    st.bar_chart(
-        style_summary.set_index("style_code")[["recent_sales", "reorder_qty"]],
-        use_container_width=True,
-    )
-
-with right:
-    st.subheader("주차별 리오더 필요 수량")
-    weekly_reorder = pd.DataFrame(
-        {
-            "week": ["w0", "w1", "w2", "w3", "w4"],
-            "reorder_qty": [
-                filtered_df["w0_reorder"].sum(),
-                filtered_df["w1_reorder"].sum(),
-                filtered_df["w2_reorder"].sum(),
-                filtered_df["w3_reorder"].sum(),
-                filtered_df["w4_reorder"].sum(),
-            ],
-            "lackplant_cnt": [
-                filtered_df["w0_lackplant"].sum(),
-                filtered_df["w1_lackplant"].sum(),
-                filtered_df["w2_lackplant"].sum(),
-                filtered_df["w3_lackplant"].sum(),
-                filtered_df["w4_lackplant"].sum(),
-            ],
-        }
-    )
-    st.bar_chart(weekly_reorder.set_index("week")[["reorder_qty"]], use_container_width=True)
+c1.metric("스타일 수", f"{total_style:,}")
+c2.metric("SKU 수", f"{total_sku:,}")
+c3.metric("금주 리오더 필요 스타일 수", f"{w0_reorder_style_cnt:,}")
+c4.metric("금주 리오더 필요 SKU 수", f"{w0_reorder_sku_cnt:,}")
+c5.metric("차주 리오더 필요 스타일 수", f"{w1_reorder_style_cnt:,}")
+c6.metric("차주 리오더 필요 SKU 수", f"{w1_reorder_sku_cnt:,}")
 
 st.divider()
 
