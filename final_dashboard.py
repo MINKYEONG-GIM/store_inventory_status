@@ -9,9 +9,9 @@ from supabase import create_client, Client
 # =========================
 # 기본 설정
 # =========================
-st.set_page_config(page_title="판매량 / 리오더 대시보드", layout="wide")
-st.title("판매량 / 리오더 필요 수량 대시보드")
-st.caption("dashboard 테이블 기준으로 판매량과 리오더 필요 수량만 조회하는 화면")
+st.set_page_config(page_title="SCM Agent", layout="wide")
+st.title("SCM Agent")
+st.caption("매장별 SKU단위로 측정하여 리오더수량 제안합니다")
 
 
 # =========================
