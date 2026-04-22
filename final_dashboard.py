@@ -225,6 +225,7 @@ detail_df = filtered_df[
 ].copy()
 # -- 상세 내역 열 이름(컬럼명) 수정
 detail_df = detail_df.rename(columns={
+    "base_stock": "현 매장재고",
     "plant_nm": "매장명",
     "avg_sale_prev_2w": "최근 2주 주판량",
     "w1_sale_prev": "전주 판매량", 
@@ -239,7 +240,7 @@ detail_df = detail_df.rename(columns={
     "w3_lackplant": "w+3 부족매장수", 
     "w4_reorder": "w+4 부족수량", 
     "w4_lackplant": "w+4 부족매장수", 
-    "total_reorder": "엔딩까지 총 리오더수량"
+    "total_reorder": "총 리오더수량"
     
     
 })
