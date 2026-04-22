@@ -183,12 +183,12 @@ w1_reorder_style_cnt = w1_reorder_df["style_code"].nunique()
 w1_reorder_sku_cnt = w1_reorder_df["sku"].nunique()
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("스타일 수", f"{total_style:,}")
-c2.metric("SKU 수", f"{total_sku:,}")
-c3.metric("금주 리오더 필요 스타일 수", f"{w0_reorder_style_cnt:,}")
-c4.metric("금주 리오더 필요 SKU 수", f"{w0_reorder_sku_cnt:,}")
-c5.metric("차주 리오더 필요 스타일 수", f"{w1_reorder_style_cnt:,}")
-c6.metric("차주 리오더 필요 SKU 수", f"{w1_reorder_sku_cnt:,}")
+c1.metric("총 스타일수", f"{total_style:,}")
+c2.metric("총 SKU수", f"{total_sku:,}")
+c3.metric("금주 리오더필요 스타일", f"{w0_reorder_style_cnt:,}")
+c4.metric("금주 리오더필요 SKU", f"{w0_reorder_sku_cnt:,}")
+c5.metric("차주 리오더필요 스타일", f"{w1_reorder_style_cnt:,}")
+c6.metric("차주 리오더필요 SKU", f"{w1_reorder_sku_cnt:,}")
 
 st.divider()
 
@@ -196,7 +196,7 @@ st.divider()
 # =========================
 # 상세 테이블
 # =========================
-st.subheader("상세 데이터")
+st.subheader("상세 내역")
 
 detail_df = filtered_df[
     [
