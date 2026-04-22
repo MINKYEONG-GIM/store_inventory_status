@@ -1,6 +1,7 @@
 psycopg2-binary
 pandas
 numpy
+xlsxwriter
 supabase
 streamlit
 pandas
