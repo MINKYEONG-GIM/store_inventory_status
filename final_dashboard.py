@@ -222,23 +222,23 @@ sku_summary = (
 )
 
 sku_summary = sku_summary.rename(columns={
-    "base_stock": "총 매장재고",
-    "total_sales": "총 판매량",
-    "total_reorder": "총 리오더 수량",
+    "base_stock": "현 총 매장재고",
+    "total_sales": "누적 판매량",
+    "total_reorder": "총 리오더 필요수량\n엔딩까지",
 
-    "w0_loss": "W+0 LOSS",
-    "w0_lackplant": "W+0 부족매장수",
+    "w0_loss": "금주 예상 매출 loss",
+    "w0_lackplant": "금주 부족매장수",
 
-    "w1_loss": "W+1 LOSS",
+    "w1_loss": "W+1 부족수량",
     "w1_lackplant": "W+1 부족매장수",
 
-    "w2_loss": "W+2 LOSS",
+    "w2_loss": "W+2 부족수량",
     "w2_lackplant": "W+2 부족매장수",
 
-    "w3_loss": "W+3 LOSS",
+    "w3_loss": "W+3 부족수량",
     "w3_lackplant": "W+3 부족매장수",
 
-    "w4_loss": "W+4 LOSS",
+    "w4_loss": "W+4 부족수량",
     "w4_lackplant": "W+4 부족매장수",
 })
 
