@@ -38,7 +38,7 @@ def load_dashboard_data() -> pd.DataFrame:
     response = (
         supabase.table("dashboard")
         .select(
-            "id, created_at, style_code, sku, plant, total_reorder, "
+            "id, created_at, style_code, sku, plant, plant_nm, total_reorder, "
             "w0_reorder, w0_lackplant, "
             "w1_reorder, w1_lackplant, "
             "w2_reorder, w2_lackplant, "
