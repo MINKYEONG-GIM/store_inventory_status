@@ -210,22 +210,38 @@ detail_df = filtered_df[
         "w2_sale_prev",
         "avg_sale_prev_2w",
         "w0_reorder",
-        "w1_reorder",
-        "w2_reorder",
-        "w3_reorder",
-        "w4_reorder",
-        "sum_reorder_5w",
         "w0_lackplant",
+        "w1_reorder",
         "w1_lackplant",
+        "w2_reorder",
         "w2_lackplant",
+        "w3_reorder",
         "w3_lackplant",
+        "w4_reorder",
         "w4_lackplant",
-        "sum_lackplant_5w",
-        "total_reorder",
+        "total_reorder"
     ]
 ].copy()
 # -- 상세 내역 열 이름(컬럼명) 수정
-detail_df = detail_df.rename(columns={"plant_nm": "매장명"}) 
+detail_df = detail_df.rename(columns={
+    "plant_nm": "매장명",
+    "w1_sale_prev": "전주 판매량", 
+    "w2_sale_prev": "2주전 판매량",
+    "w0_reorder": "금주 부족수량", 
+    "w0_lackplant": "금주 부족매장수", 
+    "w1_reorder": "w+1 부족수량", 
+    "w1_lackplant": "w+1 부족매장수", 
+    "w2_reorder": "w+2 부족수량", 
+    "w2_lackplant": "w+2 부족매장수",
+    "w3_reorder": "w+3 부족수량", 
+    "w3_lackplant": "w+3 부족매장수", 
+    "w4_reorder": "w+4 부족수량", 
+    "w4_lackplant": "w+4 부족매장수", 
+    "total_reorder": "엔딩까지 총 리오더수량"
+    
+    
+})
+
 detail_df = detail_df.sort_values(["sum_reorder_5w", "avg_sale_prev_2w"], ascending=[False, False])
 
 st.dataframe(detail_df, use_container_width=True, height=500)
