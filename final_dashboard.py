@@ -199,9 +199,7 @@ st.divider()
 st.subheader("상세 내역")
 
 detail_df = filtered_df[
-    [
-        "created_at",
-        "style_code",
+    [  "style_code",
         "sku",
         "plant",
         "plant_nm",
