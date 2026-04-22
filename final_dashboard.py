@@ -1,5 +1,6 @@
 import os
 from typing import Optional
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -304,10 +305,15 @@ st.dataframe(detail_df, use_container_width=True, height=500)
 # =========================
 # CSV 다운로드
 # =========================
-csv = detail_df.to_csv(index=False).encode("utf-8-sig")
+
+
+output = BytesIO()
+with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    detail_df.to_excel(writer, index=False, sheet_name="detail")
+
 st.download_button(
-    label="상세 데이터 CSV 다운로드",
-    data=csv,
-    file_name="dashboard_sales_reorder_detail.csv",
-    mime="text/csv",
+    label="엑셀 다운로드",
+    data=output.getvalue(),
+    file_name="dashboard_sales_reorder_detail.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
