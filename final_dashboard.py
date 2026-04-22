@@ -224,8 +224,8 @@ detail_df = filtered_df[
         "total_reorder",
     ]
 ].copy()
-
-detail_df = detail_df.rename(columns={"plant_nm": "매장명"}) -- 상세 내역 열 이름(컬럼명) 수정
+# -- 상세 내역 열 이름(컬럼명) 수정
+detail_df = detail_df.rename(columns={"plant_nm": "매장명"}) 
 detail_df = detail_df.sort_values(["sum_reorder_5w", "avg_sale_prev_2w"], ascending=[False, False])
 
 st.dataframe(detail_df, use_container_width=True, height=500)
