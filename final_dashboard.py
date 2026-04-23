@@ -465,8 +465,11 @@ grid_options["rowData"] = row_data
 grid_options["tooltipShowDelay"] = 100
 grid_options["tooltipMouseTrack"] = True
 
+
+grid_json = grid_df.to_json(orient="records", force_ascii=False)
+
 AgGrid(
-    None,
+    grid_json,
     gridOptions=grid_options,
     allow_unsafe_jscode=True,
     update_mode="NO_UPDATE",
