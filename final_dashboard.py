@@ -492,6 +492,8 @@ if selected_rows:
         suffixes=("_base", "_curr")
     ).sort_values("week_no")
 
+    chart_df["올해 실판매 + 엔딩까지 예측"] = chart_df["올해 실판매 + 엔딩까지 예측"].fillna(0)
+
     # year_week 보정
     chart_df["year_week"] = chart_df["year_week_curr"].combine_first(chart_df["year_week_base"])
 
@@ -500,10 +502,11 @@ if selected_rows:
     chart_df["week_no"] = pd.to_numeric(chart_df["week_no"], errors="coerce")
 
     st.markdown(f"**SKU: {selected_sku} / PLANT: {selected_plant}**")
+    st.caption("파란선: 기준 PLC / 빨간선: 올해 매출예측값")
 
     base_line = (
         alt.Chart(chart_df.dropna(subset=["기준 PLC"]))
-        .mark_line(point=True)
+        .mark_line(point=True, interpolate="linear")
         .encode(
             x=alt.X("week_no:Q", title="주차"),
             y=alt.Y("기준 PLC:Q", title="기준 PLC", axis=alt.Axis(titleColor="#1f77b4")),
@@ -517,7 +520,7 @@ if selected_rows:
     )
 
     current_line = (
-        alt.Chart(chart_df.dropna(subset=["올해 실판매 + 엔딩까지 예측"]))
+        alt.Chart(chart_df)
         .mark_line(point=True)
         .encode(
             x=alt.X("week_no:Q", title="주차"),
