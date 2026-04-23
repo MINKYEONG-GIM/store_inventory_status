@@ -464,60 +464,78 @@ if selected_rows:
     selected_plant = str(selected_row["plant"])
     selected_item_code = str(selected_row["item_code"])
 
-    base_chart_df = item_plc_df[item_plc_df["item_code"] == selected_item_code].copy()
+    # 파란선: item_plc 기준 PLC
+    base_chart_df = item_plc_df[
+        item_plc_df["item_code"].astype(str) == selected_item_code
+    ].copy()
     base_chart_df = base_chart_df.sort_values("week_no")
-    base_chart_df = base_chart_df[["year_week", "week_no", "last_year_ratio_pct"]].rename(
+    base_chart_df = base_chart_df[["week_no", "year_week", "last_year_ratio_pct"]].rename(
         columns={"last_year_ratio_pct": "기준 PLC"}
     )
 
+    # 빨간선: sku_weekly_forecast_2 sale_qty
     current_chart_df = forecast_curve_df[
         (forecast_curve_df["sku"].astype(str) == selected_sku) &
         (forecast_curve_df["plant"].astype(str) == selected_plant)
     ].copy()
     current_chart_df = current_chart_df.sort_values("week_no")
-    current_chart_df = current_chart_df[["year_week", "week_no", "sale_qty"]].rename(
+    current_chart_df = current_chart_df[["week_no", "year_week", "sale_qty"]].rename(
         columns={"sale_qty": "올해 실판매 + 엔딩까지 예측"}
     )
 
+    # week_no 기준 outer join
     chart_df = pd.merge(
         base_chart_df,
         current_chart_df,
         on="week_no",
-        how="outer"
+        how="outer",
+        suffixes=("_base", "_curr")
     ).sort_values("week_no")
-    
-    # year_week 보정
-    chart_df["year_week"] = chart_df["year_week_x"].combine_first(chart_df["year_week_y"])
-    chart_df = chart_df.drop(columns=["year_week_x", "year_week_y"])
-    
-    
- 
 
-    chart_long_df = chart_df.melt(
-        id_vars=["year_week", "week_no"],
-        value_vars=["기준 PLC", "올해 실판매 + 엔딩까지 예측"],
-        var_name="구분",
-        value_name="값"
-    ).dropna(subset=["값"])
+    # year_week 보정
+    chart_df["year_week"] = chart_df["year_week_curr"].combine_first(chart_df["year_week_base"])
+
+    # week_no 없으면 제거
+    chart_df = chart_df.dropna(subset=["week_no"]).copy()
+    chart_df["week_no"] = pd.to_numeric(chart_df["week_no"], errors="coerce")
 
     st.markdown(f"**SKU: {selected_sku} / PLANT: {selected_plant}**")
 
-    line_chart = (
-        alt.Chart(chart_long_df)
+    base_line = (
+        alt.Chart(chart_df.dropna(subset=["기준 PLC"]))
         .mark_line(point=True)
         .encode(
             x=alt.X("week_no:Q", title="주차"),
-            y=alt.Y("값:Q", title="값"),
-            color=alt.Color(
-                "구분:N",
-                scale=alt.Scale(
-                    domain=["기준 PLC", "올해 실판매 + 엔딩까지 예측"],
-                    range=["#1f77b4", "#d62728"]
-                )
-            ),
-            tooltip=["year_week", "week_no", "구분", "값"]
+            y=alt.Y("기준 PLC:Q", title="기준 PLC", axis=alt.Axis(titleColor="#1f77b4")),
+            tooltip=[
+                alt.Tooltip("year_week:N", title="주차"),
+                alt.Tooltip("week_no:Q", title="week_no"),
+                alt.Tooltip("기준 PLC:Q", title="기준 PLC")
+            ]
         )
         .properties(height=380)
+    )
+
+    current_line = (
+        alt.Chart(chart_df.dropna(subset=["올해 실판매 + 엔딩까지 예측"]))
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("week_no:Q", title="주차"),
+            y=alt.Y(
+                "올해 실판매 + 엔딩까지 예측:Q",
+                title="올해 실판매 + 엔딩까지 예측",
+                axis=alt.Axis(titleColor="#d62728")
+            ),
+            tooltip=[
+                alt.Tooltip("year_week:N", title="주차"),
+                alt.Tooltip("week_no:Q", title="week_no"),
+                alt.Tooltip("올해 실판매 + 엔딩까지 예측:Q", title="올해 실판매 + 엔딩까지 예측")
+            ]
+        )
+    )
+
+    line_chart = alt.layer(base_line, current_line).resolve_scale(
+        y="independent"
     )
 
     st.altair_chart(line_chart, use_container_width=True)
