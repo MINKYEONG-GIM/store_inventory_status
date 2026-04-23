@@ -492,7 +492,6 @@ if selected_rows:
         suffixes=("_base", "_curr")
     ).sort_values("week_no")
 
-    chart_df["올해 실판매 + 엔딩까지 예측"] = chart_df["올해 실판매 + 엔딩까지 예측"].fillna(0)
 
     # year_week 보정
     chart_df["year_week"] = chart_df["year_week_curr"].combine_first(chart_df["year_week_base"])
@@ -502,11 +501,11 @@ if selected_rows:
     chart_df["week_no"] = pd.to_numeric(chart_df["week_no"], errors="coerce")
 
     st.markdown(f"**SKU: {selected_sku} / PLANT: {selected_plant}**")
-    st.caption("파란선: 기준 PLC / 빨간선: 올해 매출예측값")
+    st.caption("그래프 계열값 | 파란선: 작년 기준 PLC | 빨간선: 올해 실판매 + 엔딩까지 예측")
 
     base_line = (
         alt.Chart(chart_df.dropna(subset=["기준 PLC"]))
-        .mark_line(point=True, interpolate="linear")
+        .mark_line(point=True, interpolate="linear", color="#1f77b4")
         .encode(
             x=alt.X("week_no:Q", title="주차"),
             y=alt.Y("기준 PLC:Q", title="기준 PLC", axis=alt.Axis(titleColor="#1f77b4")),
@@ -520,8 +519,8 @@ if selected_rows:
     )
 
     current_line = (
-        alt.Chart(chart_df)
-        .mark_line(point=True)
+        alt.Chart(chart_df.dropna(subset=["올해 실판매 + 엔딩까지 예측"]))
+        .mark_line(point=True, interpolate="linear", color="#d62728", strokeWidth=3)
         .encode(
             x=alt.X("week_no:Q", title="주차"),
             y=alt.Y(
@@ -537,7 +536,27 @@ if selected_rows:
         )
     )
 
-    line_chart = alt.layer(base_line, current_line).resolve_scale(
+    legend_df = pd.DataFrame({
+        "x": [1, 1],
+        "y": [chart_df["기준 PLC"].max() if chart_df["기준 PLC"].notna().any() else 0,
+              (chart_df["기준 PLC"].max() if chart_df["기준 PLC"].notna().any() else 0) * 0.9],
+        "label": ["파란선: 작년 기준 PLC", "빨간선: 올해 실판매 + 엔딩까지 예측"],
+        "color": ["#1f77b4", "#d62728"]
+    })
+    
+    legend_text = (
+        alt.Chart(legend_df)
+        .mark_text(align="left", dx=10, fontSize=12)
+        .encode(
+            x=alt.value(10),
+            y=alt.Y("y:Q"),
+            text="label:N",
+            color=alt.Color("color:N", scale=None)
+        )
+    )
+    
+    
+    line_chart = alt.layer(base_line, current_line, legend_text).resolve_scale(
         y="independent"
     )
 
