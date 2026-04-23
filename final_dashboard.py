@@ -67,6 +67,7 @@ def load_forecast_curve_data() -> pd.DataFrame:
         supabase.table("sku_weekly_forecast_2")
         .select("style_code, sku, plant, year_week, sale_qty, week_no")
         .order("week_no")
+        .range(0, 50000)
         .execute()
     )
 
