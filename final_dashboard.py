@@ -78,7 +78,7 @@ def load_forecast_curve_data() -> pd.DataFrame:
     if df.empty:
         return df
 
-    df["week_no"] = pd.to_numeric(df["week_no"], errors="coerce")
+    df["week_no"] = pd.to_numeric(df["week_no"], errors="coerce").astype(float) # 타입을 float으로 통일
     df["sale_qty"] = pd.to_numeric(df["sale_qty"], errors="coerce").fillna(0)
 
     df["sku"] = df["sku"].astype(str).str.strip().str.upper()
@@ -505,6 +505,15 @@ if selected_rows:
         columns={"sale_qty": "올해 실판매 + 엔딩까지 예측"}
     )
 
+    # 선택한 매장 상세 PLC 그래프 섹션 내 수정
+    base_chart_df["week_no"] = pd.to_numeric(base_chart_df["week_no"], errors="coerce").astype(float)
+    current_chart_df["week_no"] = pd.to_numeric(current_chart_df["week_no"], errors="coerce").astype(float)
+    
+    # 이후 merge 실행
+    chart_df = pd.merge(base_chart_df, current_chart_df, on="week_no", how="outer", ...)
+        
+    
+    
     # week_no 기준 outer join
     chart_df = pd.merge(
         base_chart_df,
