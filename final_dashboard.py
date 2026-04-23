@@ -79,6 +79,10 @@ def load_forecast_curve_data() -> pd.DataFrame:
     df["week_no"] = pd.to_numeric(df["week_no"], errors="coerce")
     df["sale_qty"] = pd.to_numeric(df["sale_qty"], errors="coerce").fillna(0)
 
+    df["sku"] = df["sku"].astype(str).str.strip().str.upper()
+    df["plant"] = df["plant"].astype(str).str.strip().str.upper()
+    df["year_week"] = df["year_week"].astype(str).str.strip()
+
     return df
 
 @st.cache_data(ttl=300)
@@ -121,6 +125,8 @@ def load_dashboard_data() -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+    df["sku"] = df["sku"].astype(str).str.strip().str.upper()
+    df["plant"] = df["plant"].astype(str).str.strip().str.upper()
 
     # 최근 2주 평균 판매량
     df["avg_sale_prev_2w"] = (df["w1_sale_prev"] + df["w2_sale_prev"]) / 2
@@ -460,8 +466,8 @@ if selected_rows:
     selected_idx = selected_rows[0]
     selected_row = detail_source_df.iloc[selected_idx]
 
-    selected_sku = str(selected_row["sku"])
-    selected_plant = str(selected_row["plant"])
+    selected_sku = str(selected_row["sku"]).strip().upper()
+    selected_plant = str(selected_row["plant"]).strip().upper()
     selected_item_code = str(selected_row["item_code"])
 
     # 파란선: item_plc 기준 PLC
@@ -478,6 +484,7 @@ if selected_rows:
         (forecast_curve_df["sku"].astype(str) == selected_sku) &
         (forecast_curve_df["plant"].astype(str) == selected_plant)
     ].copy()
+    st.write("빨간선 데이터 건수:", len(current_chart_df))
     current_chart_df = current_chart_df.sort_values("week_no")
     current_chart_df = current_chart_df[["week_no", "year_week", "sale_qty"]].rename(
         columns={"sale_qty": "올해 실판매 + 엔딩까지 예측"}
