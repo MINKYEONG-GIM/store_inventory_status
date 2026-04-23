@@ -466,9 +466,11 @@ grid_options["tooltipShowDelay"] = 100
 grid_options["tooltipMouseTrack"] = True
 
 AgGrid(
-    grid_df,
+    None,
     gridOptions=grid_options,
     allow_unsafe_jscode=True,
+    update_mode="NO_UPDATE",
+    data_return_mode="AS_INPUT",
     use_container_width=True,
     height=350,
     fit_columns_on_grid_load=False,
