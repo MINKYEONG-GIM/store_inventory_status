@@ -481,17 +481,21 @@ if selected_rows:
 
     # 빨간선: sku_weekly_forecast_2 sale_qty
     current_chart_df = forecast_curve_df[
-        (forecast_curve_df["sku"].astype(str) == selected_sku) &
-        (forecast_curve_df["plant"].astype(str) == selected_plant)
+        (forecast_curve_df["sku"].astype(str).str.strip().str.upper() == selected_sku) &
+        (forecast_curve_df["plant"].astype(str).str.strip().str.upper() == selected_plant)
     ].copy()
     
-    # 선택한 plant 데이터가 없으면 sku 기준 전체 fallback
-    if current_chart_df.empty:
-        current_chart_df = forecast_curve_df[
-            forecast_curve_df["sku"].astype(str) == selected_sku
-        ].copy()
-    
+    st.write("선택 SKU:", selected_sku)
+    st.write("선택 PLANT:", selected_plant)
     st.write("빨간선 데이터 건수:", len(current_chart_df))
+    
+    if current_chart_df.empty:
+        st.write(
+            forecast_curve_df[
+                forecast_curve_df["sku"].astype(str).str.strip().str.upper() == selected_sku
+            ][["sku", "plant", "year_week", "sale_qty", "week_no"]]
+            .sort_values(["plant", "week_no"])
+        )
     
     current_chart_df = current_chart_df.sort_values("week_no")
     current_chart_df = current_chart_df.drop_duplicates(subset=["week_no"])
