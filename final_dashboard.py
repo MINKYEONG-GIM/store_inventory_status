@@ -360,13 +360,6 @@ sku_summary = sku_summary.rename(columns={
 grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
 
 
-
-# tooltip에서 숨김 데이터 참조할 수 있게 rowData 재구성
-row_data = sku_summary.to_dict("records")
-grid_options["rowData"] = row_data
-grid_options["tooltipShowDelay"] = 100
-grid_options["tooltipMouseTrack"] = True
-
 # 화면 표시용 요약 테이블
 grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
 
