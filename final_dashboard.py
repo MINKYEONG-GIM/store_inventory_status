@@ -509,9 +509,7 @@ if selected_rows:
     base_chart_df["week_no"] = pd.to_numeric(base_chart_df["week_no"], errors="coerce").astype(float)
     current_chart_df["week_no"] = pd.to_numeric(current_chart_df["week_no"], errors="coerce").astype(float)
     
-    # 이후 merge 실행
-    chart_df = pd.merge(base_chart_df, current_chart_df, on="week_no", how="outer", ...)
-        
+
     
     
     # week_no 기준 outer join
