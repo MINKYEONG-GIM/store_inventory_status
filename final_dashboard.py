@@ -484,8 +484,17 @@ if selected_rows:
         (forecast_curve_df["sku"].astype(str) == selected_sku) &
         (forecast_curve_df["plant"].astype(str) == selected_plant)
     ].copy()
+    
+    # 선택한 plant 데이터가 없으면 sku 기준 전체 fallback
+    if current_chart_df.empty:
+        current_chart_df = forecast_curve_df[
+            forecast_curve_df["sku"].astype(str) == selected_sku
+        ].copy()
+    
     st.write("빨간선 데이터 건수:", len(current_chart_df))
+    
     current_chart_df = current_chart_df.sort_values("week_no")
+    current_chart_df = current_chart_df.drop_duplicates(subset=["week_no"])
     current_chart_df = current_chart_df[["week_no", "year_week", "sale_qty"]].rename(
         columns={"sale_qty": "올해 실판매 + 엔딩까지 예측"}
     )
