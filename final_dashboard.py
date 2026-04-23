@@ -43,6 +43,7 @@ def load_item_plc_data() -> pd.DataFrame:
         supabase.table("item_plc")
         .select("item_code, year_week, sales, last_year_ratio_pct, week_no")
         .order("week_no")
+        .range(0, 50000)
         .execute()
     )
 
