@@ -3,7 +3,6 @@ from typing import Optional
 from io import BytesIO
 
 import json
-from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 import pandas as pd
 import streamlit as st
@@ -361,85 +360,6 @@ sku_summary = sku_summary.rename(columns={
 grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
 
 
-tooltip_js = JsCode("""
-class CustomTooltip {
-  init(params) {
-    const eGui = document.createElement('div');
-    eGui.style.background = 'white';
-    eGui.style.border = '1px solid #d9d9d9';
-    eGui.style.borderRadius = '8px';
-    eGui.style.padding = '12px';
-    eGui.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-    eGui.style.maxWidth = '520px';
-
-    const makeSvgLine = (series, title) => {
-      if (!series || series.length === 0) {
-        return `<div style="margin-bottom:10px;"><div style="font-weight:600; margin-bottom:6px;">${title}</div><div>데이터 없음</div></div>`;
-      }
-
-      const w = 460;
-      const h = 140;
-      const p = 24;
-      const values = series.map(x => Number(x.value || 0));
-      const labels = series.map(x => x.label || '');
-      const minV = Math.min(...values, 0);
-      const maxV = Math.max(...values, 1);
-      const range = maxV - minV || 1;
-
-      const pts = values.map((v, i) => {
-        const x = p + (i * (w - p * 2) / Math.max(series.length - 1, 1));
-        const y = h - p - ((v - minV) / range) * (h - p * 2);
-        return `${x},${y}`;
-      }).join(' ');
-
-      const circles = values.map((v, i) => {
-        const x = p + (i * (w - p * 2) / Math.max(series.length - 1, 1));
-        const y = h - p - ((v - minV) / range) * (h - p * 2);
-        return `<circle cx="${x}" cy="${y}" r="3" fill="#2563eb">
-                  <title>${labels[i]} : ${v}</title>
-                </circle>`;
-      }).join('');
-
-      return `
-        <div style="margin-bottom:12px;">
-          <div style="font-weight:600; margin-bottom:6px;">${title}</div>
-          <svg width="${w}" height="${h}">
-            <line x1="${p}" y1="${h-p}" x2="${w-p}" y2="${h-p}" stroke="#999" />
-            <line x1="${p}" y1="${p}" x2="${p}" y2="${h-p}" stroke="#999" />
-            <polyline fill="none" stroke="#2563eb" stroke-width="2" points="${pts}" />
-            ${circles}
-          </svg>
-        </div>
-      `;
-    };
-
-    let baseSeries = [];
-    let forecastMap = {};
-
-    try { baseSeries = JSON.parse(params.data["기준 PLC"] || "[]"); } catch(e) {}
-    try { forecastMap = JSON.parse(params.data["올해 예상 매출 PLC"] || "{}"); } catch(e) {}
-
-    let html = `<div style="font-weight:700; margin-bottom:8px;">SKU: ${params.data.sku}</div>`;
-    html += makeSvgLine(baseSeries, 'item_plc(기준 PLC)');
-
-    const plants = Object.keys(forecastMap || {});
-    if (plants.length === 0) {
-      html += `<div><div style="font-weight:600; margin-bottom:6px;">올해 예상 매출 PLC</div><div>데이터 없음</div></div>`;
-    } else {
-      plants.forEach(plant => {
-        html += makeSvgLine(forecastMap[plant], `올해 예상 매출 PLC (${plant})`);
-      });
-    }
-
-    eGui.innerHTML = html;
-    this.eGui = eGui;
-  }
-
-  getGui() {
-    return this.eGui;
-  }
-}
-""")
 
 gb = GridOptionsBuilder.from_dataframe(grid_df)
 
@@ -465,20 +385,54 @@ grid_options["rowData"] = row_data
 grid_options["tooltipShowDelay"] = 100
 grid_options["tooltipMouseTrack"] = True
 
+# 화면 표시용 요약 테이블
+grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
 
-grid_json = grid_df.to_json(orient="records", force_ascii=False)
+st.dataframe(grid_df, use_container_width=True, height=350)
 
-AgGrid(
-    grid_json,
-    gridOptions=grid_options,
-    allow_unsafe_jscode=True,
-    update_mode="NO_UPDATE",
-    data_return_mode="AS_INPUT",
-    use_container_width=True,
-    height=350,
-    fit_columns_on_grid_load=False,
-    theme="streamlit",
-)
+# SKU 선택해서 PLC 그래프 보기
+st.subheader("SKU PLC 비교")
+
+sku_options_chart = grid_df["sku"].dropna().unique().tolist()
+selected_chart_sku = st.selectbox("그래프 볼 SKU 선택", sku_options_chart)
+
+if selected_chart_sku:
+    selected_item_code = sku_summary.loc[sku_summary["sku"] == selected_chart_sku, "item_code"].iloc[0]
+
+    # 1) item_plc : 기준 PLC
+    plc_chart_df = item_plc_df[item_plc_df["item_code"] == selected_item_code].copy()
+    plc_chart_df = plc_chart_df.sort_values("week_no")
+
+    if not plc_chart_df.empty:
+        plc_chart_df["기준 PLC"] = plc_chart_df["last_year_ratio_pct"]
+        st.markdown("**item_plc(기준 PLC)**")
+        st.line_chart(
+            plc_chart_df.set_index("year_week")[["기준 PLC"]],
+            use_container_width=True
+        )
+    else:
+        st.info("해당 SKU의 item_plc(기준 PLC) 데이터가 없습니다.")
+
+    # 2) sku_weekly_forecast_2 : 올해 예상 매출 PLC
+    forecast_chart_df = forecast_curve_df[forecast_curve_df["sku"] == selected_chart_sku].copy()
+    forecast_chart_df = forecast_chart_df.sort_values(["plant", "week_no"])
+
+    if not forecast_chart_df.empty:
+        st.markdown("**sku_weekly_forecast_2(올해 예상 매출 PLC)**")
+
+        for plant in forecast_chart_df["plant"].dropna().unique():
+            plant_df = forecast_chart_df[forecast_chart_df["plant"] == plant].copy()
+            plant_df = plant_df.sort_values("week_no")
+            plant_df["올해 예상 매출 PLC"] = plant_df["sale_qty"]
+
+            st.markdown(f"**PLANT: {plant}**")
+            st.line_chart(
+                plant_df.set_index("year_week")[["올해 예상 매출 PLC"]],
+                use_container_width=True
+            )
+    else:
+        st.info("해당 SKU의 올해 예상 매출 PLC 데이터가 없습니다.")
+
 
 # =========================
 # 상세 테이블
