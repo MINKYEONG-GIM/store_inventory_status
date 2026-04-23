@@ -429,6 +429,29 @@ detail_event = st.dataframe(
     selection_mode="single-row"
 )
 
+
+# =========================
+# CSV 다운로드
+# =========================
+
+
+output = BytesIO()
+with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    detail_df.to_excel(writer, index=False, sheet_name="detail")
+
+st.download_button(
+    label="엑셀 다운로드",
+    data=output.getvalue(),
+    file_name="dashboard_sales_reorder_detail.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+
+
+# =========================
+# 선택한 매장 상세 PLC 그래프
+# =========================
+
 st.subheader("선택한 매장 상세 PLC 그래프")
 
 selected_rows = detail_event.selection.rows
@@ -503,18 +526,3 @@ else:
 
 
 
-# =========================
-# CSV 다운로드
-# =========================
-
-
-output = BytesIO()
-with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    detail_df.to_excel(writer, index=False, sheet_name="detail")
-
-st.download_button(
-    label="엑셀 다운로드",
-    data=output.getvalue(),
-    file_name="dashboard_sales_reorder_detail.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
