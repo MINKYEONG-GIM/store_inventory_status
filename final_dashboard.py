@@ -2,6 +2,9 @@ import os
 from typing import Optional
 from io import BytesIO
 
+import json
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
@@ -32,6 +35,53 @@ def get_supabase_client() -> Client:
 # =========================
 # 데이터 조회
 # =========================
+
+@st.cache_data(ttl=300)
+def load_item_plc_data() -> pd.DataFrame:
+    supabase = get_supabase_client()
+
+    response = (
+        supabase.table("item_plc")
+        .select("item_code, year_week, sales, last_year_ratio_pct, week_no")
+        .order("week_no")
+        .execute()
+    )
+
+    data = response.data or []
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    df["week_no"] = pd.to_numeric(df["week_no"], errors="coerce")
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce").fillna(0)
+    df["last_year_ratio_pct"] = pd.to_numeric(df["last_year_ratio_pct"], errors="coerce").fillna(0)
+
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_forecast_curve_data() -> pd.DataFrame:
+    supabase = get_supabase_client()
+
+    response = (
+        supabase.table("sku_weekly_forecast_2")
+        .select("style_code, sku, plant, year_week, sale_qty, week_no")
+        .order("week_no")
+        .execute()
+    )
+
+    data = response.data or []
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    df["week_no"] = pd.to_numeric(df["week_no"], errors="coerce")
+    df["sale_qty"] = pd.to_numeric(df["sale_qty"], errors="coerce").fillna(0)
+
+    return df
+
 @st.cache_data(ttl=300)
 def load_dashboard_data() -> pd.DataFrame:
     supabase = get_supabase_client()
@@ -129,10 +179,12 @@ def apply_filters(
 # =========================
 try:
     df = load_dashboard_data()
+    item_plc_df = load_item_plc_data()
+    forecast_curve_df = load_forecast_curve_data()
 except Exception as e:
     st.error(f"데이터 로드 중 오류가 발생했습니다: {e}")
     st.stop()
-
+    
 if df.empty:
     st.warning("dashboard 테이블에 데이터가 없습니다.")
     st.stop()
@@ -193,10 +245,12 @@ c6.metric("차주 리오더필요 SKU", f"{w1_reorder_sku_cnt:,}")
 
 st.divider()
 
+
 # =========================
 # SKU별 요약
 # =========================
 st.subheader("상세 내역")
+
 sku_summary = (
     filtered_df.groupby(["style_code", "sku"], as_index=False)
     .agg(
@@ -222,6 +276,66 @@ sku_summary = (
     .sort_values(["total_reorder", "total_sales"], ascending=[False, False])
 )
 
+# item_code 생성: MATERIAL 3~4번째 자리와 동일한 규칙
+sku_summary["item_code"] = sku_summary["sku"].astype(str).str[2:4]
+
+# item_plc 기준 PLC 생성
+item_plc_curve_map = {}
+if not item_plc_df.empty:
+    plc_grouped = (
+        item_plc_df.sort_values(["item_code", "week_no"])
+        .groupby("item_code", dropna=False)
+    )
+    for item_code, g in plc_grouped:
+        item_plc_curve_map[item_code] = [
+            {
+                "week_no": int(row["week_no"]) if pd.notna(row["week_no"]) else None,
+                "value": float(row["last_year_ratio_pct"]) if pd.notna(row["last_year_ratio_pct"]) else 0.0,
+                "label": str(row["year_week"]) if pd.notna(row["year_week"]) else ""
+            }
+            for _, row in g.iterrows()
+        ]
+
+# sku_weekly_forecast_2 기준 올해 예상 매출 PLC 생성
+forecast_curve_map = {}
+if not forecast_curve_df.empty:
+    fc_grouped = (
+        forecast_curve_df.sort_values(["sku", "plant", "week_no"])
+        .groupby(["sku", "plant"], dropna=False)
+    )
+    for (sku, plant), g in fc_grouped:
+        forecast_curve_map[(sku, plant)] = [
+            {
+                "week_no": int(row["week_no"]) if pd.notna(row["week_no"]) else None,
+                "value": float(row["sale_qty"]) if pd.notna(row["sale_qty"]) else 0.0,
+                "label": str(row["year_week"]) if pd.notna(row["year_week"]) else ""
+            }
+            for _, row in g.iterrows()
+        ]
+
+# SKU별로 매장(PLANT)별 예상곡선 묶기
+plant_curve_map = {}
+if not forecast_curve_df.empty:
+    for sku, g_sku in forecast_curve_df.groupby("sku", dropna=False):
+        plant_curve_map[sku] = {}
+        for plant, g_plant in g_sku.sort_values("week_no").groupby("plant", dropna=False):
+            plant_curve_map[sku][str(plant)] = [
+                {
+                    "week_no": int(row["week_no"]) if pd.notna(row["week_no"]) else None,
+                    "value": float(row["sale_qty"]) if pd.notna(row["sale_qty"]) else 0.0,
+                    "label": str(row["year_week"]) if pd.notna(row["year_week"]) else ""
+                }
+                for _, row in g_plant.iterrows()
+            ]
+
+sku_summary["기준 PLC"] = sku_summary["item_code"].map(
+    lambda x: json.dumps(item_plc_curve_map.get(x, []), ensure_ascii=False)
+)
+
+sku_summary["올해 예상 매출 PLC"] = sku_summary["sku"].map(
+    lambda x: json.dumps(plant_curve_map.get(x, {}), ensure_ascii=False)
+)
+
 sku_summary = sku_summary.rename(columns={
     "base_stock": "현 총 매장재고",
     "total_sales": "누적 판매량",
@@ -243,7 +357,124 @@ sku_summary = sku_summary.rename(columns={
     "w4_lackplant": "W+4 부족매장수",
 })
 
-st.dataframe(sku_summary, use_container_width=True, height=350)
+# 화면에는 숨길 보조 컬럼
+display_df = sku_summary.copy()
+
+tooltip_js = JsCode("""
+class CustomTooltip {
+  init(params) {
+    const eGui = document.createElement('div');
+    eGui.style.background = 'white';
+    eGui.style.border = '1px solid #d9d9d9';
+    eGui.style.borderRadius = '8px';
+    eGui.style.padding = '12px';
+    eGui.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+    eGui.style.maxWidth = '520px';
+
+    const makeSvgLine = (series, title) => {
+      if (!series || series.length === 0) {
+        return `<div style="margin-bottom:10px;"><div style="font-weight:600; margin-bottom:6px;">${title}</div><div>데이터 없음</div></div>`;
+      }
+
+      const w = 460;
+      const h = 140;
+      const p = 24;
+      const values = series.map(x => Number(x.value || 0));
+      const labels = series.map(x => x.label || '');
+      const minV = Math.min(...values, 0);
+      const maxV = Math.max(...values, 1);
+      const range = maxV - minV || 1;
+
+      const pts = values.map((v, i) => {
+        const x = p + (i * (w - p * 2) / Math.max(series.length - 1, 1));
+        const y = h - p - ((v - minV) / range) * (h - p * 2);
+        return `${x},${y}`;
+      }).join(' ');
+
+      const circles = values.map((v, i) => {
+        const x = p + (i * (w - p * 2) / Math.max(series.length - 1, 1));
+        const y = h - p - ((v - minV) / range) * (h - p * 2);
+        return `<circle cx="${x}" cy="${y}" r="3" fill="#2563eb">
+                  <title>${labels[i]} : ${v}</title>
+                </circle>`;
+      }).join('');
+
+      return `
+        <div style="margin-bottom:12px;">
+          <div style="font-weight:600; margin-bottom:6px;">${title}</div>
+          <svg width="${w}" height="${h}">
+            <line x1="${p}" y1="${h-p}" x2="${w-p}" y2="${h-p}" stroke="#999" />
+            <line x1="${p}" y1="${p}" x2="${p}" y2="${h-p}" stroke="#999" />
+            <polyline fill="none" stroke="#2563eb" stroke-width="2" points="${pts}" />
+            ${circles}
+          </svg>
+        </div>
+      `;
+    };
+
+    let baseSeries = [];
+    let forecastMap = {};
+
+    try { baseSeries = JSON.parse(params.data["기준 PLC"] || "[]"); } catch(e) {}
+    try { forecastMap = JSON.parse(params.data["올해 예상 매출 PLC"] || "{}"); } catch(e) {}
+
+    let html = `<div style="font-weight:700; margin-bottom:8px;">SKU: ${params.data.sku}</div>`;
+    html += makeSvgLine(baseSeries, 'item_plc(기준 PLC)');
+
+    const plants = Object.keys(forecastMap || {});
+    if (plants.length === 0) {
+      html += `<div><div style="font-weight:600; margin-bottom:6px;">올해 예상 매출 PLC</div><div>데이터 없음</div></div>`;
+    } else {
+      plants.forEach(plant => {
+        html += makeSvgLine(forecastMap[plant], `올해 예상 매출 PLC (${plant})`);
+      });
+    }
+
+    eGui.innerHTML = html;
+    this.eGui = eGui;
+  }
+
+  getGui() {
+    return this.eGui;
+  }
+}
+""")
+
+gb = GridOptionsBuilder.from_dataframe(
+    display_df.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore")
+)
+
+gb.configure_default_column(
+    resizable=True,
+    sortable=True,
+    filter=True,
+    floatingFilter=True,
+)
+
+gb.configure_column(
+    "sku",
+    header_name="sku",
+    tooltipField="기준 PLC",
+    tooltipComponent=tooltip_js
+)
+
+grid_options = gb.build()
+
+# tooltip에서 숨김 데이터 참조할 수 있게 rowData 재구성
+row_data = display_df.to_dict("records")
+grid_options["rowData"] = row_data
+grid_options["tooltipShowDelay"] = 100
+grid_options["tooltipMouseTrack"] = True
+
+AgGrid(
+    display_df,
+    gridOptions=grid_options,
+    allow_unsafe_jscode=True,
+    use_container_width=True,
+    height=350,
+    fit_columns_on_grid_load=False,
+    theme="streamlit",
+)
 
 # =========================
 # 상세 테이블
