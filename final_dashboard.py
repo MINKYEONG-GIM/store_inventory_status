@@ -357,8 +357,9 @@ sku_summary = sku_summary.rename(columns={
     "w4_lackplant": "W+4 부족매장수",
 })
 
-# 화면에는 숨길 보조 컬럼
-display_df = sku_summary.copy()
+# 화면 표시용 컬럼만 분리
+grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
+
 
 tooltip_js = JsCode("""
 class CustomTooltip {
@@ -440,9 +441,7 @@ class CustomTooltip {
 }
 """)
 
-gb = GridOptionsBuilder.from_dataframe(
-    display_df.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore")
-)
+gb = GridOptionsBuilder.from_dataframe(grid_df)
 
 gb.configure_default_column(
     resizable=True,
@@ -461,13 +460,13 @@ gb.configure_column(
 grid_options = gb.build()
 
 # tooltip에서 숨김 데이터 참조할 수 있게 rowData 재구성
-row_data = display_df.to_dict("records")
+row_data = sku_summary.to_dict("records")
 grid_options["rowData"] = row_data
 grid_options["tooltipShowDelay"] = 100
 grid_options["tooltipMouseTrack"] = True
 
 AgGrid(
-    display_df,
+    grid_df,
     gridOptions=grid_options,
     allow_unsafe_jscode=True,
     use_container_width=True,
