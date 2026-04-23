@@ -2,6 +2,7 @@ psycopg2-binary
 pandas
 numpy
 xlsxwriter
+streamlit-aggrid
 supabase
 streamlit
 pandas
