@@ -356,8 +356,6 @@ sku_summary = sku_summary.rename(columns={
     "w4_lackplant": "W+4 부족매장수",
 })
 
-# 화면 표시용 컬럼만 분리
-grid_df = sku_summary.drop(columns=["item_code", "기준 PLC", "올해 예상 매출 PLC"], errors="ignore").copy()
 
 
 # 화면 표시용 요약 테이블
@@ -367,25 +365,7 @@ st.dataframe(grid_df, use_container_width=True, height=350)
 
 
 
-    # 2) sku_weekly_forecast_2 : 올해 예상 매출 PLC
-    forecast_chart_df = forecast_curve_df[forecast_curve_df["sku"] == selected_chart_sku].copy()
-    forecast_chart_df = forecast_chart_df.sort_values(["plant", "week_no"])
 
-    if not forecast_chart_df.empty:
-        st.markdown("**sku_weekly_forecast_2(올해 예상 매출 PLC)**")
-
-        for plant in forecast_chart_df["plant"].dropna().unique():
-            plant_df = forecast_chart_df[forecast_chart_df["plant"] == plant].copy()
-            plant_df = plant_df.sort_values("week_no")
-            plant_df["올해 예상 매출 PLC"] = plant_df["sale_qty"]
-
-            st.markdown(f"**PLANT: {plant}**")
-            st.line_chart(
-                plant_df.set_index("year_week")[["올해 예상 매출 PLC"]],
-                use_container_width=True
-            )
-    else:
-        st.info("해당 SKU의 올해 예상 매출 PLC 데이터가 없습니다.")
 
 
 # =========================
@@ -428,12 +408,18 @@ detail_df = detail_source_df.rename(columns={
     "total_reorder": "총 리오더수량"
 })
 
+detail_df["__idx"] = detail_df.index
+detail_source_df["__idx"] = detail_source_df.index
+
 detail_df = detail_df.sort_values(
     ["w+1 부족수량", "w+2 부족수량", "총 리오더수량"],
     ascending=[False, False, False]
 ).reset_index(drop=True)
 
-detail_source_df = detail_source_df.loc[detail_df.index].reset_index(drop=True)
+detail_source_df = detail_source_df.set_index("__idx").loc[detail_df["__idx"]].reset_index(drop=True)
+detail_df = detail_df.drop(columns="__idx")
+
+
 
 detail_event = st.dataframe(
     detail_df,
@@ -473,9 +459,16 @@ if selected_rows:
     chart_df = pd.merge(
         base_chart_df,
         current_chart_df,
-        on=["year_week", "week_no"],
+        on="week_no",
         how="outer"
     ).sort_values("week_no")
+    
+    # year_week 보정
+    chart_df["year_week"] = chart_df["year_week_x"].combine_first(chart_df["year_week_y"])
+    chart_df = chart_df.drop(columns=["year_week_x", "year_week_y"])
+    
+    
+ 
 
     chart_long_df = chart_df.melt(
         id_vars=["year_week", "week_no"],
@@ -490,7 +483,7 @@ if selected_rows:
         alt.Chart(chart_long_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("year_week:N", title="주차", sort=list(chart_df["year_week"].dropna())),
+            x=alt.X("week_no:Q", title="주차"),
             y=alt.Y("값:Q", title="값"),
             color=alt.Color(
                 "구분:N",
@@ -499,7 +492,7 @@ if selected_rows:
                     range=["#1f77b4", "#d62728"]
                 )
             ),
-            tooltip=["year_week", "구분", "값"]
+            tooltip=["year_week", "week_no", "구분", "값"]
         )
         .properties(height=380)
     )
