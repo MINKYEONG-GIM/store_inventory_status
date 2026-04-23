@@ -499,7 +499,7 @@ if selected_rows:
 
     st.altair_chart(line_chart, use_container_width=True)
 else:
-    st.info("매장별 상세 내역 표에서 행 하나를 클릭하면 그래프가 아래에 표시됩니다.")
+    st.info("매장별 상세내역 표 체크박스를 선택 시 그래프가 아래에 표시됩니다.")
 
 
 
